@@ -1,0 +1,74 @@
+Incorrect
+
+declare function makeResource(): Disposable;
+declare function makeAsyncResource(): AsyncDisposable;
+
+makeResource();
+~~~~~~~~~~~~~~~ `Disposable` values must be bound via `using`, returned, otherwise handled, or be explicitly marked as ignored with the `void` operator.
+
+const res = makeResource();
+      ~~~~~~~~~~~~~~~~~~~~ `Disposable` value should be declared with `using` instead of `const`.
+
+async function f() {
+  makeAsyncResource();
+  ~~~~~~~~~~~~~~~~~~~~ `AsyncDisposable` values must be bound via `await using`, returned, otherwise handled, or be explicitly marked as ignored with the `void` operator.
+  const ar = makeAsyncResource();
+        ~~~~~~~~~~~~~~~~~~~~~~~~ `AsyncDisposable` value should be declared with `await using` instead of `const`.
+}
+
+Correct
+
+declare function makeResource(): Disposable;
+declare function makeAsyncResource(): AsyncDisposable;
+
+{
+  using res = makeResource();
+}
+
+async function f() {
+  await using ar = makeAsyncResource();
+}
+
+function takeOwnership(stack: DisposableStack): Disposable {
+  return stack.use(makeResource());
+}
+
+Correct
+Options: { "ignoreVoid": true }
+
+declare function makeResource(): Disposable;
+
+void makeResource();
+
+Incorrect
+Options: { "ignoreVoid": false }
+
+declare function makeResource(): Disposable;
+
+void makeResource();
+~~~~~~~~~~~~~~~~~~~~ `Disposable` values must be bound via `using`, returned, or otherwise handled.
+
+Incorrect
+
+declare function makeResource(): Disposable;
+makeResource();
+~~~~~~~~~~~~~~~ `Disposable` values must be bound via `using`, returned, otherwise handled, or be explicitly marked as ignored with the `void` operator.
+
+Correct
+Options: {"allowForKnownSafeDisposables":[{"from":"file","name":"SafeDisposable"}]}
+
+type SafeDisposable = Disposable & { __safe?: true };
+declare function makeSafe(): SafeDisposable;
+makeSafe();
+
+Incorrect
+
+declare function unsafe(): Disposable;
+unsafe();
+~~~~~~~~~ `Disposable` values must be bound via `using`, returned, otherwise handled, or be explicitly marked as ignored with the `void` operator.
+
+Correct
+Options: {"allowForKnownSafeCalls":[{"from":"file","name":"safe"}]}
+
+declare function safe(): Disposable;
+safe();

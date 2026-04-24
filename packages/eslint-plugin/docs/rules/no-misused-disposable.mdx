@@ -1,0 +1,176 @@
+---
+description: 'Require `Disposable`/`AsyncDisposable` values to be bound via `using` or otherwise handled.'
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+> 🛑 This file is source code, not the primary documentation location! 🛑
+>
+> See **https://typescript-eslint.io/rules/no-misused-disposable** for documentation.
+
+The [Explicit Resource Management proposal](https://github.com/tc39/proposal-explicit-resource-management) adds `using` and `await using` declarations that automatically call `Symbol.dispose` / `Symbol.asyncDispose` when a binding goes out of scope. A value whose static type is `Disposable` or `AsyncDisposable` that is **not** bound via `using` / `await using` (or otherwise handled) leaks the underlying resource.
+
+This rule reports:
+
+- Bare `Disposable` / `AsyncDisposable` expression statements, such as `makeResource();`.
+- `const` / `let` / `var` declarations whose initializer has a `Disposable` / `AsyncDisposable` type — suggesting they be converted to `using` / `await using`.
+
+A value is considered handled if it is:
+
+- Bound to a `using` / `await using` declaration.
+- Returned, yielded, or assigned to an outer scope.
+- Passed to a function whose parameter is typed as `Disposable` / `AsyncDisposable` (for example, `DisposableStack#use` / `DisposableStack#adopt`).
+- Explicitly marked as ignored with the [`void` operator](#ignorevoid).
+
+:::tip
+`no-misused-disposable` only flags values whose static type is `Disposable` or `AsyncDisposable`. Use [`await-thenable`](./await-thenable.mdx) to catch the opposite mistake — `await using` on a value that is not async disposable.
+:::
+
+## Examples
+
+<Tabs>
+<TabItem value="❌ Incorrect">
+
+```ts
+declare function makeResource(): Disposable;
+declare function makeAsyncResource(): AsyncDisposable;
+
+makeResource();
+
+const res = makeResource();
+
+async function f() {
+  makeAsyncResource();
+  const ar = makeAsyncResource();
+}
+```
+
+</TabItem>
+<TabItem value="✅ Correct">
+
+```ts
+declare function makeResource(): Disposable;
+declare function makeAsyncResource(): AsyncDisposable;
+
+{
+  using res = makeResource();
+}
+
+async function f() {
+  await using ar = makeAsyncResource();
+}
+
+function takeOwnership(stack: DisposableStack): Disposable {
+  return stack.use(makeResource());
+}
+```
+
+</TabItem>
+</Tabs>
+
+## Options
+
+### `ignoreVoid`
+
+{/* insert option description */}
+
+Placing the [`void` operator](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/void) in front of a `Disposable` expression is a way to explicitly mark it as intentionally unbound.
+
+:::warning
+Voiding a `Disposable` does not dispose of it — the resource still leaks. `void` is purely a marker for the linter, analogous to `no-floating-promises`'s treatment of `void`.
+:::
+
+<Tabs>
+<TabItem value="✅ Correct">
+
+```ts option='{ "ignoreVoid": true }'
+declare function makeResource(): Disposable;
+
+void makeResource();
+```
+
+</TabItem>
+<TabItem value="❌ Incorrect">
+
+```ts option='{ "ignoreVoid": false }'
+declare function makeResource(): Disposable;
+
+void makeResource();
+```
+
+</TabItem>
+</Tabs>
+
+### `allowForKnownSafeDisposables`
+
+{/* insert option description */}
+
+Disposable values whose type matches one of these specifiers will not be flagged.
+
+This option takes the shared [`TypeOrValueSpecifier` format](/packages/type-utils/type-or-value-specifier).
+
+<Tabs>
+<TabItem value="❌ Incorrect">
+
+```ts
+declare function makeResource(): Disposable;
+makeResource();
+```
+
+</TabItem>
+<TabItem value="✅ Correct">
+
+```ts option='{"allowForKnownSafeDisposables":[{"from":"file","name":"SafeDisposable"}]}'
+type SafeDisposable = Disposable & { __safe?: true };
+declare function makeSafe(): SafeDisposable;
+makeSafe();
+```
+
+</TabItem>
+</Tabs>
+
+### `allowForKnownSafeCalls`
+
+{/* insert option description */}
+
+Calls to these functions will not be flagged even when their return type is disposable.
+
+This option takes the shared [`TypeOrValueSpecifier` format](/packages/type-utils/type-or-value-specifier).
+
+For example, recent versions of Node attach `Symbol.dispose` to the handles returned by `setTimeout` and `setInterval`. If you do not dispose of those handles in your code, add them to the allowlist.
+
+<Tabs>
+<TabItem value="❌ Incorrect">
+
+```ts
+declare function unsafe(): Disposable;
+unsafe();
+```
+
+</TabItem>
+<TabItem value="✅ Correct">
+
+```ts option='{"allowForKnownSafeCalls":[{"from":"file","name":"safe"}]}'
+declare function safe(): Disposable;
+safe();
+```
+
+</TabItem>
+</Tabs>
+
+## When Not To Use It
+
+If your project does not use explicit resource management, you do not need this rule.
+
+This rule uses a pessimistic analysis — any `const` / `let` / `var` binding of a disposable value is reported, even if the variable is later returned or passed to a stack. Projects that make heavy use of custom ownership-transfer helpers may see false positives; the `allowForKnownSafeCalls` / `allowForKnownSafeDisposables` options are the intended escape hatches.
+
+## Related To
+
+- [`await-thenable`](./await-thenable.mdx)
+- [`no-floating-promises`](./no-floating-promises.mdx)
+
+## Further Reading
+
+- [TC39 Explicit Resource Management proposal](https://github.com/tc39/proposal-explicit-resource-management)
+- [TypeScript 5.2 release notes — `using` declarations](https://devblogs.microsoft.com/typescript/announcing-typescript-5-2/#using-declarations-and-explicit-resource-management)
