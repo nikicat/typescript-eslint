@@ -10,6 +10,7 @@ import {
   createRule,
   getOperatorPrecedenceForNode,
   getParserServices,
+  isBuiltinSymbolLike,
   isParenthesized,
   nullThrows,
   NullThrowsReasons,
@@ -302,6 +303,28 @@ export default createRule<Options, MessageId>({
     function isKnownSafeCall(node: TSESTree.Node): boolean {
       if (node.type !== AST_NODE_TYPES.CallExpression) {
         return false;
+      }
+
+      // Built-in `DisposableStack`/`AsyncDisposableStack` transfer methods:
+      // `use(value)` and `adopt(value, onDispose)` both return their `value`
+      // argument, so a bare `stack.use(makeResource())` statement has a
+      // `Disposable` return type even though ownership has already been
+      // transferred to the stack.
+      if (
+        node.callee.type === AST_NODE_TYPES.MemberExpression &&
+        node.callee.property.type === AST_NODE_TYPES.Identifier &&
+        (node.callee.property.name === 'use' ||
+          node.callee.property.name === 'adopt')
+      ) {
+        const objectType = services.getTypeAtLocation(node.callee.object);
+        if (
+          isBuiltinSymbolLike(services.program, objectType, [
+            'DisposableStack',
+            'AsyncDisposableStack',
+          ])
+        ) {
+          return true;
+        }
       }
 
       const type = services.getTypeAtLocation(node.callee);

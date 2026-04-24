@@ -168,8 +168,8 @@ A `const` / `let` / `var` binding is treated as handled when any read reference 
 Known limitations where you may still see false positives:
 
 - Class-field assignment from a constructor or method body — escape analysis does not follow control flow through `this`.
-- `DisposableStack#use(value)` as a bare expression statement — the method returns its argument, so the statement type is `Disposable`. Use `void stack.use(...)` or the `allowForKnownSafeCalls` option.
 - Ownership transfer via custom helpers whose parameter type is not itself `Disposable` — the `allowForKnownSafeCalls` / `allowForKnownSafeDisposables` options are the intended escape hatches.
+- Bare calls to host APIs whose return types carry `Symbol.dispose` (for example, `setTimeout` in recent Node types) — configure them via `allowForKnownSafeCalls`. The built-in `DisposableStack#use` / `#adopt` and `AsyncDisposableStack#use` / `#adopt` passthrough methods are recognized out of the box.
 
 ## Related To
 

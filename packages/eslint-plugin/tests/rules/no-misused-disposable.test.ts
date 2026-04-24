@@ -173,15 +173,13 @@ function f() {
 }
     `,
     // Escape analysis: passed to `DisposableStack#use` — whose parameter type
-    // is `Disposable`, ownership transfers to the stack. The `void` prefix is
-    // only needed to silence the separate `ExpressionStatement` report on the
-    // passthrough return value.
+    // is `Disposable`, ownership transfers to the stack.
     `
 declare function makeResource(): Disposable;
 declare const stack: DisposableStack;
 function f() {
   const r = makeResource();
-  void stack.use(r);
+  stack.use(r);
 }
     `,
     // Escape analysis: assigned to an object property whose type carries
@@ -231,6 +229,41 @@ function produce(): Disposable {
   const r = makeResource();
   const alias: Disposable = r;
   return alias;
+}
+    `,
+    // Built-in `DisposableStack#use` transfers ownership — bare call statement
+    // is treated as safe even though the method's return type is `Disposable`.
+    `
+declare function makeResource(): Disposable;
+declare const stack: DisposableStack;
+stack.use(makeResource());
+    `,
+    // Built-in `AsyncDisposableStack#use` — same but for async.
+    `
+declare function makeAsyncResource(): AsyncDisposable;
+declare const stack: AsyncDisposableStack;
+stack.use(makeAsyncResource());
+    `,
+    // Built-in `DisposableStack#adopt` — same passthrough shape.
+    `
+declare function makeResource(): unknown;
+declare const stack: DisposableStack;
+stack.adopt(makeResource(), () => {});
+    `,
+    // Method receiver must actually be a DisposableStack — a same-named method
+    // on an unrelated type is NOT treated as safe. This confirms the built-in
+    // check isn't matching by name alone. (Would normally flag; we bind via
+    // `using` to keep the outer test case valid.)
+    `
+declare function makeResource(): Disposable;
+class NotAStack {
+  use(x: Disposable): Disposable {
+    return x;
+  }
+}
+declare const notStack: NotAStack;
+{
+  using r = notStack.use(makeResource());
 }
     `,
   ],
@@ -578,33 +611,6 @@ void makeResource();
         },
       ],
       options: [{ ignoreVoid: false }],
-    },
-    // Known MVP limitation: `DisposableStack#use` returns the value it
-    // receives, so a bare `stack.use(makeResource())` statement has a
-    // `Disposable` return type and is flagged. Users can silence this with
-    // the `allowForKnownSafeCalls` option.
-    {
-      code: `
-declare function makeResource(): Disposable;
-declare const stack: DisposableStack;
-stack.use(makeResource());
-      `,
-      errors: [
-        {
-          line: 4,
-          messageId: 'floatingDisposableVoid',
-          suggestions: [
-            {
-              messageId: 'floatingFixVoid',
-              output: `
-declare function makeResource(): Disposable;
-declare const stack: DisposableStack;
-void stack.use(makeResource());
-      `,
-            },
-          ],
-        },
-      ],
     },
     // Escape-analysis counterexample: passing the binding to `console.log`
     // does not transfer ownership (parameter type is `unknown`), so it remains
