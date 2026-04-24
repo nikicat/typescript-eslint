@@ -20,6 +20,7 @@ import {
   typeMatchesSomeSpecifier,
   valueMatchesSomeSpecifier,
 } from '../util';
+import { getParentFunctionNode } from '../util/getParentFunctionNode';
 
 export type Options = [
   {
@@ -222,6 +223,11 @@ export default createRule<Options, MessageId>({
             continue;
           }
 
+          // Destructuring patterns bind to sub-values; skip for MVP.
+          if (declarator.id.type !== AST_NODE_TYPES.Identifier) {
+            continue;
+          }
+
           // Aliasing: `const x = y` — `y` already owns disposal.
           if (init.type === AST_NODE_TYPES.Identifier) {
             continue;
@@ -241,6 +247,15 @@ export default createRule<Options, MessageId>({
 
           const kind = getDisposableKind(type, checker);
           if (kind == null) {
+            continue;
+          }
+
+          // If any read reference of the declared binding reaches a destination
+          // that still carries a `Disposable`/`AsyncDisposable` type, treat it
+          // as an ownership transfer and skip the report.
+          const declaredVars =
+            context.sourceCode.getDeclaredVariables(declarator);
+          if (declaredVars.some(v => v.references.some(doesReferenceEscape))) {
             continue;
           }
 
@@ -315,6 +330,138 @@ export default createRule<Options, MessageId>({
         allowForKnownSafeDisposables,
         services.program,
       );
+    }
+
+    // A reference is treated as an ownership transfer when it reaches a
+    // destination whose type still carries `Disposable`/`AsyncDisposable`.
+    // Non-disposable destinations (e.g. `console.log(x: unknown)`) leave the
+    // resource orphaned, so they are not treated as escape.
+    function doesReferenceEscape(ref: TSESLint.Scope.Reference): boolean {
+      if (!ref.isRead()) {
+        return false;
+      }
+      let node: TSESTree.Node = ref.identifier;
+      let parent = node.parent as TSESTree.Node | undefined;
+      while (parent) {
+        switch (parent.type) {
+          // Transparent wrappers — keep walking up.
+          case AST_NODE_TYPES.ChainExpression:
+          case AST_NODE_TYPES.ConditionalExpression:
+          case AST_NODE_TYPES.LogicalExpression:
+          case AST_NODE_TYPES.SequenceExpression:
+          case AST_NODE_TYPES.TSAsExpression:
+          case AST_NODE_TYPES.TSNonNullExpression:
+          case AST_NODE_TYPES.TSSatisfiesExpression:
+          case AST_NODE_TYPES.TSTypeAssertion:
+            node = parent;
+            parent = parent.parent;
+            continue;
+
+          case AST_NODE_TYPES.ReturnStatement: {
+            const fn = getParentFunctionNode(parent);
+            if (fn == null) {
+              return false;
+            }
+            return preservesDisposableKind(getReturnType(fn));
+          }
+
+          case AST_NODE_TYPES.ArrowFunctionExpression: {
+            // Only implicit-return position matters; parameter defaults don't escape.
+            if (parent.body !== node) {
+              return false;
+            }
+            return preservesDisposableKind(getReturnType(parent));
+          }
+
+          case AST_NODE_TYPES.CallExpression:
+          case AST_NODE_TYPES.NewExpression: {
+            if (parent.callee === node) {
+              return false;
+            }
+            const argIndex = parent.arguments.indexOf(
+              node as TSESTree.CallExpressionArgument,
+            );
+            if (argIndex < 0) {
+              return false;
+            }
+            const tsCall = services.esTreeNodeToTSNodeMap.get(parent);
+            return preservesDisposableKind(
+              checker.getContextualTypeForArgumentAtIndex(tsCall, argIndex),
+            );
+          }
+
+          case AST_NODE_TYPES.AssignmentExpression: {
+            if (parent.right !== node) {
+              return false;
+            }
+            return preservesDisposableKind(
+              services.getTypeAtLocation(parent.left),
+            );
+          }
+
+          case AST_NODE_TYPES.Property: {
+            if (parent.value !== node) {
+              return false;
+            }
+            const tsNode = services.esTreeNodeToTSNodeMap.get(
+              node,
+            ) as ts.Expression;
+            return preservesDisposableKind(checker.getContextualType(tsNode));
+          }
+
+          case AST_NODE_TYPES.ArrayExpression: {
+            const tsNode = services.esTreeNodeToTSNodeMap.get(
+              node,
+            ) as ts.Expression;
+            return preservesDisposableKind(checker.getContextualType(tsNode));
+          }
+
+          case AST_NODE_TYPES.VariableDeclarator: {
+            if (parent.init !== node) {
+              return false;
+            }
+            return preservesDisposableKind(
+              services.getTypeAtLocation(parent.id),
+            );
+          }
+
+          // Rare/deferred escape positions — treat permissively.
+          case AST_NODE_TYPES.SpreadElement:
+          case AST_NODE_TYPES.ThrowStatement:
+          case AST_NODE_TYPES.YieldExpression:
+            return true;
+
+          default:
+            return false;
+        }
+      }
+      return false;
+    }
+
+    function getReturnType(
+      fn:
+        | TSESTree.ArrowFunctionExpression
+        | TSESTree.FunctionDeclaration
+        | TSESTree.FunctionExpression,
+    ): ts.Type | undefined {
+      const fnType = services.getTypeAtLocation(fn);
+      const returnType = fnType.getCallSignatures().at(0)?.getReturnType();
+      if (returnType == null) {
+        return undefined;
+      }
+      // Unwrap `Promise<T>` for async functions — `return x` returns `T`.
+      if (fn.async) {
+        return checker.getAwaitedType(returnType) ?? returnType;
+      }
+      return returnType;
+    }
+
+    function preservesDisposableKind(t: ts.Type | undefined): boolean {
+      // Ambiguous context (unknown callee, missing contextual type): permit.
+      if (t == null) {
+        return true;
+      }
+      return getDisposableKind(t, checker) != null;
     }
 
     function getUnhandledDisposableKind(node: TSESTree.Node): DisposableKind {

@@ -163,7 +163,13 @@ safe();
 
 If your project does not use explicit resource management, you do not need this rule.
 
-This rule uses a pessimistic analysis — any `const` / `let` / `var` binding of a disposable value is reported, even if the variable is later returned or passed to a stack. Projects that make heavy use of custom ownership-transfer helpers may see false positives; the `allowForKnownSafeCalls` / `allowForKnownSafeDisposables` options are the intended escape hatches.
+A `const` / `let` / `var` binding is treated as handled when any read reference reaches a destination whose type still carries `Disposable` / `AsyncDisposable` — for example, a `return` from a function typed to return one, a function argument whose parameter type includes one, or an assignment to a property typed as one. Destinations that lose the disposable shape (for example `console.log(x: unknown)`, or `return` from a `void`-returning function) are treated as ownership loss and remain reported.
+
+Known limitations where you may still see false positives:
+
+- Class-field assignment from a constructor or method body — escape analysis does not follow control flow through `this`.
+- `DisposableStack#use(value)` as a bare expression statement — the method returns its argument, so the statement type is `Disposable`. Use `void stack.use(...)` or the `allowForKnownSafeCalls` option.
+- Ownership transfer via custom helpers whose parameter type is not itself `Disposable` — the `allowForKnownSafeCalls` / `allowForKnownSafeDisposables` options are the intended escape hatches.
 
 ## Related To
 

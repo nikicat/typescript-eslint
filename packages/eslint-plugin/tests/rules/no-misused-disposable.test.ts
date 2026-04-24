@@ -137,6 +137,102 @@ for (const r of arr) {
 declare function makeResource(): Disposable;
 export const exported = makeResource();
     `,
+    // Escape analysis: binding returned from a function whose return type
+    // preserves the `Disposable` shape.
+    `
+declare function makeResource(): Disposable;
+function produce(): Disposable {
+  const r = makeResource();
+  return r;
+}
+    `,
+    // Escape analysis: async variant — return type preserves `AsyncDisposable`.
+    `
+declare function makeAsyncResource(): AsyncDisposable;
+async function produce(): Promise<AsyncDisposable> {
+  const r = makeAsyncResource();
+  return r;
+}
+    `,
+    // Escape analysis: return type is a union containing `Disposable`.
+    `
+declare function makeResource(): Disposable;
+function maybe(flag: boolean): Disposable | null {
+  const r = makeResource();
+  return flag ? r : null;
+}
+    `,
+    // Escape analysis: passed as an argument to a function whose parameter
+    // accepts `Disposable`.
+    `
+declare function makeResource(): Disposable;
+declare function register(value: Disposable): void;
+function f() {
+  const r = makeResource();
+  register(r);
+}
+    `,
+    // Escape analysis: passed to `DisposableStack#use` — whose parameter type
+    // is `Disposable`, ownership transfers to the stack. The `void` prefix is
+    // only needed to silence the separate `ExpressionStatement` report on the
+    // passthrough return value.
+    `
+declare function makeResource(): Disposable;
+declare const stack: DisposableStack;
+function f() {
+  const r = makeResource();
+  void stack.use(r);
+}
+    `,
+    // Escape analysis: assigned to an object property whose type carries
+    // `AsyncDisposable`.
+    `
+declare function makeAsyncResource(): AsyncDisposable;
+declare const holder: { current: AsyncDisposable | null };
+async function f() {
+  const r = makeAsyncResource();
+  holder.current = r;
+}
+    `,
+    // Escape analysis: used as an object literal property value where the
+    // contextual type expects a `Disposable` there.
+    `
+declare function makeResource(): Disposable;
+declare function register(options: { resource: Disposable }): void;
+function f() {
+  const r = makeResource();
+  register({ resource: r });
+}
+    `,
+    // Escape analysis: placed in an array whose contextual element type is
+    // `AsyncDisposable[]`.
+    `
+declare function makeAsyncResource(): AsyncDisposable;
+declare function registerAll(resources: AsyncDisposable[]): void;
+async function f() {
+  const r = makeAsyncResource();
+  registerAll([r]);
+}
+    `,
+    // Escape analysis: arrow implicit return whose return type preserves the
+    // disposable.
+    `
+declare function makeResource(): Disposable;
+const produce: () => Disposable = () => {
+  const r = makeResource();
+  return r;
+};
+    `,
+    // Escape analysis: alias chain where the aliasing declarator's bound type
+    // preserves the disposable.
+    `
+declare function makeResource(): Disposable;
+function produce(): Disposable {
+  const r = makeResource();
+  const alias: Disposable = r;
+  return alias;
+}
+    `,
   ],
 
   invalid: [
@@ -504,6 +600,99 @@ stack.use(makeResource());
 declare function makeResource(): Disposable;
 declare const stack: DisposableStack;
 void stack.use(makeResource());
+      `,
+            },
+          ],
+        },
+      ],
+    },
+    // Escape-analysis counterexample: passing the binding to `console.log`
+    // does not transfer ownership (parameter type is `unknown`), so it remains
+    // a leak and the declaration is still flagged.
+    {
+      code: `
+declare function makeResource(): Disposable;
+function f() {
+  const r = makeResource();
+  console.log(r);
+}
+      `,
+      errors: [
+        {
+          data: { kind: 'const' },
+          line: 4,
+          messageId: 'useDeclarationShouldBeUsing',
+          suggestions: [
+            {
+              messageId: 'floatingFixUsing',
+              output: `
+declare function makeResource(): Disposable;
+function f() {
+  using r = makeResource();
+  console.log(r);
+}
+      `,
+            },
+          ],
+        },
+      ],
+    },
+    // Escape-analysis counterexample: returning a `non-Disposable` property of
+    // the binding does not transfer ownership of the binding itself.
+    {
+      code: `
+declare function makeResource(): Disposable & { name: string };
+function produce(): string {
+  const r = makeResource();
+  return r.name;
+}
+      `,
+      errors: [
+        {
+          data: { kind: 'const' },
+          line: 4,
+          messageId: 'useDeclarationShouldBeUsing',
+          suggestions: [
+            {
+              messageId: 'floatingFixUsing',
+              output: `
+declare function makeResource(): Disposable & { name: string };
+function produce(): string {
+  using r = makeResource();
+  return r.name;
+}
+      `,
+            },
+          ],
+        },
+      ],
+    },
+    // Escape-analysis counterexample: returning from a `void`-returning
+    // function means no ownership transfer (no destination type).
+    {
+      code: `
+declare function makeResource(): Disposable;
+function f(): void {
+  const r = makeResource();
+  return;
+  r;
+}
+      `,
+      errors: [
+        {
+          data: { kind: 'const' },
+          line: 4,
+          messageId: 'useDeclarationShouldBeUsing',
+          suggestions: [
+            {
+              messageId: 'floatingFixUsing',
+              output: `
+declare function makeResource(): Disposable;
+function f(): void {
+  using r = makeResource();
+  return;
+  r;
+}
       `,
             },
           ],
