@@ -489,6 +489,12 @@ export default createRule<Options, MessageId>({
             );
           }
 
+          case AST_NODE_TYPES.ForOfStatement:
+            // `for await (const y of x)` auto-disposes `x`'s async iterator
+            // via IteratorClose when the body exits (ES2024). Plain
+            // `for (... of ...)` doesn't carry that guarantee.
+            return parent.right === node && parent.await;
+
           // Rare/deferred escape positions — treat permissively.
           case AST_NODE_TYPES.SpreadElement:
           case AST_NODE_TYPES.ThrowStatement:

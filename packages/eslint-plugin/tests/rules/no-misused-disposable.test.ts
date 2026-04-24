@@ -293,6 +293,17 @@ async function f() {
   b[Symbol.dispose]();
 }
     `,
+    // `for await...of x` auto-disposes `x`'s async iterator when the loop
+    // body exits (ES2024 IteratorClose via `Symbol.asyncDispose`).
+    `
+declare function makeAsyncIterable(): AsyncIterable<number> & AsyncDisposable;
+async function f() {
+  const iter = makeAsyncIterable();
+  for await (const v of iter) {
+    console.log(v);
+  }
+}
+    `,
   ],
 
   invalid: [
@@ -755,6 +766,40 @@ declare function makeResource(): Disposable;
 function f() {
   using r = makeResource();
   r[Symbol.dispose];
+}
+      `,
+            },
+          ],
+        },
+      ],
+    },
+    // For-await-of counterexample: plain `for (... of ...)` does not
+    // auto-dispose — only the `await` variant calls `Symbol.asyncDispose`.
+    {
+      code: `
+declare function makeIterable(): Iterable<number> & Disposable;
+function f() {
+  const iter = makeIterable();
+  for (const v of iter) {
+    console.log(v);
+  }
+}
+      `,
+      errors: [
+        {
+          data: { kind: 'const' },
+          line: 4,
+          messageId: 'useDeclarationShouldBeUsing',
+          suggestions: [
+            {
+              messageId: 'floatingFixUsing',
+              output: `
+declare function makeIterable(): Iterable<number> & Disposable;
+function f() {
+  using iter = makeIterable();
+  for (const v of iter) {
+    console.log(v);
+  }
 }
       `,
             },
