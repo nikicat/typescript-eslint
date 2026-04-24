@@ -256,7 +256,13 @@ export default createRule<Options, MessageId>({
           // as an ownership transfer and skip the report.
           const declaredVars =
             context.sourceCode.getDeclaredVariables(declarator);
-          if (declaredVars.some(v => v.references.some(doesReferenceEscape))) {
+          if (
+            declaredVars.some(v =>
+              v.references.some(
+                ref => isExplicitDisposeCall(ref) || doesReferenceEscape(ref),
+              ),
+            )
+          ) {
             continue;
           }
 
@@ -352,6 +358,41 @@ export default createRule<Options, MessageId>({
         type,
         allowForKnownSafeDisposables,
         services.program,
+      );
+    }
+
+    // A reference of the form `x[Symbol.dispose]()` or
+    // `x[Symbol.asyncDispose]()` disposes the binding in-place — the resource
+    // is released, not leaked. Match this syntactically so we don't have to
+    // resolve the well-known symbol at the type-checker level.
+    function isExplicitDisposeCall(ref: TSESLint.Scope.Reference): boolean {
+      if (!ref.isRead()) {
+        return false;
+      }
+      const id = ref.identifier;
+      const member = id.parent;
+      if (
+        member.type !== AST_NODE_TYPES.MemberExpression ||
+        member.object !== id ||
+        !member.computed
+      ) {
+        return false;
+      }
+      const prop = member.property;
+      if (
+        prop.type !== AST_NODE_TYPES.MemberExpression ||
+        prop.computed ||
+        prop.object.type !== AST_NODE_TYPES.Identifier ||
+        prop.object.name !== 'Symbol' ||
+        prop.property.type !== AST_NODE_TYPES.Identifier ||
+        (prop.property.name !== 'dispose' &&
+          prop.property.name !== 'asyncDispose')
+      ) {
+        return false;
+      }
+      const call = member.parent;
+      return (
+        call.type === AST_NODE_TYPES.CallExpression && call.callee === member
       );
     }
 

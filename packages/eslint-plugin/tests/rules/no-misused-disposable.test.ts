@@ -266,6 +266,33 @@ declare const notStack: NotAStack;
   using r = notStack.use(makeResource());
 }
     `,
+    // Explicit manual dispose via `x[Symbol.dispose]()` — binding is released
+    // in-place, no leak.
+    `
+declare function makeResource(): Disposable;
+function f() {
+  const r = makeResource();
+  r[Symbol.dispose]();
+}
+    `,
+    // Explicit manual async dispose via `await x[Symbol.asyncDispose]()`.
+    `
+declare function makeAsyncResource(): AsyncDisposable;
+async function f() {
+  const r = makeAsyncResource();
+  await r[Symbol.asyncDispose]();
+}
+    `,
+    // Multi-declarator with explicit dispose for each binding.
+    `
+declare function makeResource(): Disposable;
+async function f() {
+  const a = makeResource(),
+    b = makeResource();
+  a[Symbol.dispose]();
+  b[Symbol.dispose]();
+}
+    `,
   ],
 
   invalid: [
@@ -698,6 +725,36 @@ function f(): void {
   using r = makeResource();
   return;
   r;
+}
+      `,
+            },
+          ],
+        },
+      ],
+    },
+    // Explicit-dispose counterexample: a bare property read `r[Symbol.dispose]`
+    // without invoking it is not disposal and must still be flagged.
+    {
+      code: `
+declare function makeResource(): Disposable;
+function f() {
+  const r = makeResource();
+  r[Symbol.dispose];
+}
+      `,
+      errors: [
+        {
+          data: { kind: 'const' },
+          line: 4,
+          messageId: 'useDeclarationShouldBeUsing',
+          suggestions: [
+            {
+              messageId: 'floatingFixUsing',
+              output: `
+declare function makeResource(): Disposable;
+function f() {
+  using r = makeResource();
+  r[Symbol.dispose];
 }
       `,
             },
