@@ -33,12 +33,20 @@ export type Options = [
 ];
 
 export type MessageId =
+  | 'arrayDeclarationContainsAsyncDisposables'
+  | 'arrayDeclarationContainsDisposables'
   | 'asyncMemberInSyncDisposableClass'
+  | 'classArrayMemberNotDisposed'
   | 'classMemberNotDisposed'
+  | 'classWithDisposableArrayMemberNotDisposable'
   | 'classWithDisposableMemberNotDisposable'
   | 'floatingAsyncDisposable'
+  | 'floatingAsyncDisposableArray'
+  | 'floatingAsyncDisposableArrayVoid'
   | 'floatingAsyncDisposableVoid'
   | 'floatingDisposable'
+  | 'floatingDisposableArray'
+  | 'floatingDisposableArrayVoid'
   | 'floatingDisposableVoid'
   | 'floatingFixAwaitUsing'
   | 'floatingFixUsing'
@@ -47,6 +55,12 @@ export type MessageId =
   | 'useDeclarationShouldBeUsing';
 
 type DisposableKind = 'async' | 'sync' | null;
+type DisposableShape = 'array' | 'value';
+
+interface DisposableInfo {
+  kind: 'async' | 'sync';
+  shape: DisposableShape;
+}
 
 function getDisposableKind(
   type: ts.Type,
@@ -69,6 +83,56 @@ function getDisposableKind(
   return kind;
 }
 
+// Like `getDisposableKind`, but also recognizes arrays/tuples of disposables.
+// Returns the resource kind plus the shape ('value' for direct disposables,
+// 'array' for `T[]` / tuples whose elements carry the dispose protocol). Used
+// to flag e.g. `items.map(makeResource)` (`Disposable[]`) the same as a single
+// floating `Disposable`. With the `Owned<T>` pattern in user code that strips
+// the dispose symbols on transfer, `items.map(item => stack.use(makeResource(item)))`
+// types as `Owned<Disposable>[]` and naturally falls through.
+function getDisposableInfo(
+  type: ts.Type,
+  checker: ts.TypeChecker,
+): DisposableInfo | null {
+  const direct = getDisposableKind(type, checker);
+  if (direct != null) {
+    return { kind: direct, shape: 'value' };
+  }
+  let bestArrayKind: DisposableKind = null;
+  for (const part of tsutils
+    .unionConstituents(type)
+    .map(t => checker.getApparentType(t))) {
+    if (checker.isArrayType(part)) {
+      const elem = checker.getTypeArguments(part as ts.TypeReference).at(0);
+      if (elem == null) {
+        continue;
+      }
+      const elemKind = getDisposableKind(elem, checker);
+      if (elemKind === 'async') {
+        return { kind: 'async', shape: 'array' };
+      }
+      if (elemKind === 'sync') {
+        bestArrayKind = 'sync';
+      }
+    }
+    if (checker.isTupleType(part)) {
+      for (const elem of checker.getTypeArguments(part as ts.TypeReference)) {
+        const elemKind = getDisposableKind(elem, checker);
+        if (elemKind === 'async') {
+          return { kind: 'async', shape: 'array' };
+        }
+        if (elemKind === 'sync') {
+          bestArrayKind = 'sync';
+        }
+      }
+    }
+  }
+  if (bestArrayKind != null) {
+    return { kind: bestArrayKind, shape: 'array' };
+  }
+  return null;
+}
+
 const messageBaseDisposable =
   '`Disposable` values must be bound via `using`, returned, or otherwise handled.';
 
@@ -83,6 +147,20 @@ const messageBaseAsyncDisposableVoid =
   '`AsyncDisposable` values must be bound via `await using`, returned, otherwise handled,' +
   ' or be explicitly marked as ignored with the `void` operator.';
 
+const messageBaseDisposableArray =
+  '`Disposable[]` element resources must each be transferred (e.g. via `DisposableStack#use`), the array returned, or otherwise handled.';
+
+const messageBaseDisposableArrayVoid =
+  '`Disposable[]` element resources must each be transferred (e.g. via `DisposableStack#use`), the array returned, otherwise handled,' +
+  ' or be explicitly marked as ignored with the `void` operator.';
+
+const messageBaseAsyncDisposableArray =
+  '`AsyncDisposable[]` element resources must each be transferred (e.g. via `AsyncDisposableStack#use`), the array returned, or otherwise handled.';
+
+const messageBaseAsyncDisposableArrayVoid =
+  '`AsyncDisposable[]` element resources must each be transferred (e.g. via `AsyncDisposableStack#use`), the array returned, otherwise handled,' +
+  ' or be explicitly marked as ignored with the `void` operator.';
+
 export default createRule<Options, MessageId>({
   name: 'no-misused-disposable',
   meta: {
@@ -94,15 +172,27 @@ export default createRule<Options, MessageId>({
     },
     hasSuggestions: true,
     messages: {
+      arrayDeclarationContainsAsyncDisposables:
+        '`{{kind}} {{memberName}} = ...` holds `AsyncDisposable[]` whose elements are not handled. Transfer each via `AsyncDisposableStack#use`, return the array, or otherwise hand off ownership.',
+      arrayDeclarationContainsDisposables:
+        '`{{kind}} {{memberName}} = ...` holds `Disposable[]` whose elements are not handled. Transfer each via `DisposableStack#use`, return the array, or otherwise hand off ownership.',
       asyncMemberInSyncDisposableClass:
         '`AsyncDisposable` member `{{memberName}}` cannot be released by sync `[Symbol.dispose]()` on `{{className}}`. Implement `[Symbol.asyncDispose]()` instead.',
+      classArrayMemberNotDisposed:
+        '`{{kind}}Disposable[]` member `{{memberName}}` elements are never disposed in `[Symbol.{{disposeKey}}]()`. Iterate and call `[Symbol.{{disposeKey}}]()` on each, transfer to a stack at construction time (e.g. `stack.use(...)` per element), or remove the field.',
       classMemberNotDisposed:
         '`{{kind}}Disposable` member `{{memberName}}` is never disposed in `[Symbol.{{disposeKey}}]()`. Call `this.{{memberName}}[Symbol.{{disposeKey}}]()`, transfer ownership (e.g. `stack.use(this.{{memberName}})`), or remove the field.',
+      classWithDisposableArrayMemberNotDisposable:
+        'Class `{{className}}` has a `{{kind}}Disposable[]` member `{{memberName}}` but does not implement `[Symbol.{{disposeKey}}]()`. The held element resources will leak when the instance is discarded.',
       classWithDisposableMemberNotDisposable:
         'Class `{{className}}` has a `{{kind}}Disposable` member `{{memberName}}` but does not implement `[Symbol.{{disposeKey}}]()`. The held resource will leak when the instance is discarded.',
       floatingAsyncDisposable: messageBaseAsyncDisposable,
+      floatingAsyncDisposableArray: messageBaseAsyncDisposableArray,
+      floatingAsyncDisposableArrayVoid: messageBaseAsyncDisposableArrayVoid,
       floatingAsyncDisposableVoid: messageBaseAsyncDisposableVoid,
       floatingDisposable: messageBaseDisposable,
+      floatingDisposableArray: messageBaseDisposableArray,
+      floatingDisposableArrayVoid: messageBaseDisposableArrayVoid,
       floatingDisposableVoid: messageBaseDisposableVoid,
       floatingFixAwaitUsing: 'Bind to an `await using` declaration.',
       floatingFixUsing: 'Bind to a `using` declaration.',
@@ -170,6 +260,7 @@ export default createRule<Options, MessageId>({
       kind: 'async' | 'sync';
       name: string;
       reportNode: TSESTree.Node;
+      shape: DisposableShape;
     }
 
     interface ClassFrame {
@@ -218,19 +309,24 @@ export default createRule<Options, MessageId>({
           return;
         }
 
-        const kind = getUnhandledDisposableKind(expression);
-        if (kind == null) {
+        const info = getUnhandledDisposableInfo(expression);
+        if (info == null) {
           return;
         }
 
-        const isAsync = kind === 'async';
+        const isAsync = info.kind === 'async';
+        const isArray = info.shape === 'array';
 
         if (options.ignoreVoid) {
           context.report({
             node,
-            messageId: isAsync
-              ? 'floatingAsyncDisposableVoid'
-              : 'floatingDisposableVoid',
+            messageId: isArray
+              ? isAsync
+                ? 'floatingAsyncDisposableArrayVoid'
+                : 'floatingDisposableArrayVoid'
+              : isAsync
+                ? 'floatingAsyncDisposableVoid'
+                : 'floatingDisposableVoid',
             suggest: [
               {
                 messageId: 'floatingFixVoid',
@@ -256,9 +352,13 @@ export default createRule<Options, MessageId>({
         } else {
           context.report({
             node,
-            messageId: isAsync
-              ? 'floatingAsyncDisposable'
-              : 'floatingDisposable',
+            messageId: isArray
+              ? isAsync
+                ? 'floatingAsyncDisposableArray'
+                : 'floatingDisposableArray'
+              : isAsync
+                ? 'floatingAsyncDisposable'
+                : 'floatingDisposable',
           });
         }
       },
@@ -313,8 +413,8 @@ export default createRule<Options, MessageId>({
             continue;
           }
 
-          const kind = getDisposableKind(type, checker);
-          if (kind == null) {
+          const info = getDisposableInfo(type, checker);
+          if (info == null) {
             continue;
           }
 
@@ -336,7 +436,23 @@ export default createRule<Options, MessageId>({
             continue;
           }
 
-          const isAsync = kind === 'async';
+          const isAsync = info.kind === 'async';
+
+          if (info.shape === 'array') {
+            // `using` doesn't apply to arrays — no autofix; user must transfer
+            // each element to a stack or otherwise hand off ownership.
+            context.report({
+              node: declarator,
+              messageId: isAsync
+                ? 'arrayDeclarationContainsAsyncDisposables'
+                : 'arrayDeclarationContainsDisposables',
+              data: {
+                kind: node.kind,
+                memberName: declarator.id.name,
+              },
+            });
+            continue;
+          }
 
           context.report({
             node: declarator,
@@ -691,10 +807,12 @@ export default createRule<Options, MessageId>({
       if (t == null) {
         return true;
       }
-      return getDisposableKind(t, checker) != null;
+      return getDisposableInfo(t, checker) != null;
     }
 
-    function getUnhandledDisposableKind(node: TSESTree.Node): DisposableKind {
+    function getUnhandledDisposableInfo(
+      node: TSESTree.Node,
+    ): DisposableInfo | null {
       // Bare references to existing bindings don't produce new disposable
       // values — their disposal is the owning binding's responsibility.
       if (
@@ -711,7 +829,7 @@ export default createRule<Options, MessageId>({
 
       if (node.type === AST_NODE_TYPES.SequenceExpression) {
         for (const expr of node.expressions) {
-          const sub = getUnhandledDisposableKind(expr);
+          const sub = getUnhandledDisposableInfo(expr);
           if (sub != null) {
             return sub;
           }
@@ -724,20 +842,20 @@ export default createRule<Options, MessageId>({
         node.type === AST_NODE_TYPES.UnaryExpression &&
         node.operator === 'void'
       ) {
-        return getUnhandledDisposableKind(node.argument);
+        return getUnhandledDisposableInfo(node.argument);
       }
 
       if (node.type === AST_NODE_TYPES.ConditionalExpression) {
         return (
-          getUnhandledDisposableKind(node.alternate) ??
-          getUnhandledDisposableKind(node.consequent)
+          getUnhandledDisposableInfo(node.alternate) ??
+          getUnhandledDisposableInfo(node.consequent)
         );
       }
 
       if (node.type === AST_NODE_TYPES.LogicalExpression) {
         return (
-          getUnhandledDisposableKind(node.left) ??
-          getUnhandledDisposableKind(node.right)
+          getUnhandledDisposableInfo(node.left) ??
+          getUnhandledDisposableInfo(node.right)
         );
       }
 
@@ -748,7 +866,7 @@ export default createRule<Options, MessageId>({
         return null;
       }
 
-      return getDisposableKind(type, checker);
+      return getDisposableInfo(type, checker);
     }
 
     // ---- class-member tracking ----------------------------------------
@@ -819,18 +937,19 @@ export default createRule<Options, MessageId>({
           if (name == null) {
             continue;
           }
-          const kind = getDisposableKind(
+          const info = getDisposableInfo(
             services.getTypeAtLocation(member),
             checker,
           );
-          if (kind == null) {
+          if (info == null) {
             continue;
           }
           disposableFields.push({
             isCallerOwned: false,
-            kind,
+            kind: info.kind,
             name,
             reportNode: member,
+            shape: info.shape,
           });
           continue;
         }
@@ -849,18 +968,19 @@ export default createRule<Options, MessageId>({
             if (inner.type !== AST_NODE_TYPES.Identifier) {
               continue;
             }
-            const kind = getDisposableKind(
+            const info = getDisposableInfo(
               services.getTypeAtLocation(inner),
               checker,
             );
-            if (kind == null) {
+            if (info == null) {
               continue;
             }
             disposableFields.push({
               isCallerOwned: true,
-              kind,
+              kind: info.kind,
               name: inner.name,
               reportNode: param,
+              shape: info.shape,
             });
           }
           continue;
@@ -897,7 +1017,10 @@ export default createRule<Options, MessageId>({
         for (const field of ownedFields) {
           context.report({
             node: field.reportNode,
-            messageId: 'classWithDisposableMemberNotDisposable',
+            messageId:
+              field.shape === 'array'
+                ? 'classWithDisposableArrayMemberNotDisposable'
+                : 'classWithDisposableMemberNotDisposable',
             data: {
               className: frame.className,
               disposeKey: field.kind === 'async' ? 'asyncDispose' : 'dispose',
@@ -930,6 +1053,12 @@ export default createRule<Options, MessageId>({
       for (const field of ownedFields) {
         if (frame.classDisposableKind === 'sync' && field.kind === 'async') {
           // Already reported by Check 1's async-in-sync; don't double up.
+          continue;
+        }
+        if (field.shape === 'array') {
+          // Per-element disposal patterns (`forEach`, `for...of`, etc.) are
+          // hard to verify without false positives; defer for arrays. The
+          // canonical fix is to use a `(Async)DisposableStack` field instead.
           continue;
         }
         const candidates: TSESTree.MethodDefinition[] = [];

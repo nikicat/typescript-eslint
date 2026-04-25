@@ -221,6 +221,63 @@ Limitations of `'shape-and-dispose'`:
 - No subclass enforcement: a subclass that adds a new disposable field while inheriting the parent's dispose method is not flagged.
 - A field initialized via `this.stack.use(makeResource())` still requires explicit handling in dispose; the `use` recognition only fires at the assignment site.
 
+## Collections of Disposables
+
+The rule also flags arrays and tuples whose element type carries the dispose protocol — `Disposable[]`, `AsyncDisposable[]`, `[Disposable, Disposable]` — because there is no `Symbol.dispose` on the container itself, so without explicit handling each element leaks. Typical offending shape:
+
+<Tabs>
+<TabItem value="❌ Incorrect">
+
+```ts
+declare function makeResource(): Disposable;
+declare const items: number[];
+
+function f() {
+  const handles = items.map(() => makeResource()); // Disposable[] → leak
+}
+```
+
+</TabItem>
+<TabItem value="✅ Correct">
+
+```ts
+declare function makeResource(): Disposable;
+declare const items: number[];
+
+function f() {
+  using stack = new DisposableStack();
+  for (const item of items) {
+    stack.use(makeResource()); // ownership transferred to the stack
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+The TC39 proposal's prescribed primitive for "collection of disposables" is `(Async)DisposableStack`. The rule recognizes the canonical `stack.use(…)` / `stack.adopt(…)` transfer at any call site.
+
+If you also augment `(Async)DisposableStack#use` to return `Owned<T>` (a type that strips `Symbol.dispose` / `Symbol.asyncDispose`), then `items.map(item => stack.use(makeResource(item)))` types cleanly as `Owned<Disposable>[]` — non-disposable elements, no report — while `items.map(makeResource)` still types as `Disposable[]` and is flagged. Recommended companion declaration:
+
+```ts
+type Owned<T> = T extends null | undefined
+  ? T
+  : Omit<T, typeof Symbol.dispose | typeof Symbol.asyncDispose>;
+
+declare global {
+  interface DisposableStack {
+    use<T extends Disposable | null | undefined>(value: T): Owned<T>;
+  }
+  interface AsyncDisposableStack {
+    use<T extends AsyncDisposable | Disposable | null | undefined>(
+      value: T,
+    ): Owned<T>;
+  }
+}
+```
+
+For class fields, [`checkClassMembers: 'shape'`](#checkclassmembers) flags `private items: Disposable[]` on a non-disposable class. Check 2 (`'shape-and-dispose'`) deliberately skips array fields — per-element disposal patterns (`forEach`, `for...of`, …) are too varied to verify statically without false positives. Use a `(Async)DisposableStack` field instead.
+
 ## When Not To Use It
 
 If your project does not use explicit resource management, you do not need this rule.

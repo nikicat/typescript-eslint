@@ -321,6 +321,29 @@ function f() {
   gen.return(undefined);
 }
     `,
+    // Array whose element type has been stripped of `Symbol.dispose` (e.g.,
+    // returned from a `stack.use(...)` augmentation that returns `Owned<T>`).
+    // No element carries the dispose protocol, so the array doesn't trigger
+    // the collection-of-disposables check.
+    `
+type Owned<T> = T extends null | undefined
+  ? T
+  : Omit<T, typeof Symbol.dispose | typeof Symbol.asyncDispose>;
+declare function makeOwnedResource(): Owned<Disposable>;
+declare const items: number[];
+{
+  const handles = items.map(() => makeOwnedResource());
+  handles;
+}
+    `,
+    // Array of disposables that escapes via return — caller takes ownership.
+    `
+declare function makeResource(): Disposable;
+declare const items: number[];
+function produceAll(): Disposable[] {
+  return items.map(item => makeResource());
+}
+    `,
   ],
 
   invalid: [
@@ -824,6 +847,98 @@ function f() {
         },
       ],
     },
+    // Array of disposables produced by `.map`, bound to a `const`, never
+    // transferred or returned — every element leaks.
+    {
+      code: `
+declare function makeResource(): Disposable;
+declare const items: number[];
+function f() {
+  const handles = items.map(() => makeResource());
+}
+      `,
+      errors: [
+        {
+          data: { kind: 'const', memberName: 'handles' },
+          messageId: 'arrayDeclarationContainsDisposables',
+        },
+      ],
+    },
+    // Same shape but async.
+    {
+      code: `
+declare function makeAsyncResource(): AsyncDisposable;
+declare const items: number[];
+async function f() {
+  const handles = items.map(() => makeAsyncResource());
+}
+      `,
+      errors: [
+        {
+          data: { kind: 'const', memberName: 'handles' },
+          messageId: 'arrayDeclarationContainsAsyncDisposables',
+        },
+      ],
+    },
+    // Bare floating expression statement returning Disposable[].
+    {
+      code: `
+declare function makeResource(): Disposable;
+declare const items: number[];
+function f() {
+  items.map(() => makeResource());
+}
+      `,
+      errors: [
+        {
+          messageId: 'floatingDisposableArrayVoid',
+          suggestions: [
+            {
+              messageId: 'floatingFixVoid',
+              output: `
+declare function makeResource(): Disposable;
+declare const items: number[];
+function f() {
+  void items.map(() => makeResource());
+}
+      `,
+            },
+          ],
+        },
+      ],
+    },
+    // Bare floating expression with ignoreVoid: false.
+    {
+      code: `
+declare function makeAsyncResource(): AsyncDisposable;
+declare const items: number[];
+async function f() {
+  items.map(() => makeAsyncResource());
+}
+      `,
+      errors: [
+        {
+          messageId: 'floatingAsyncDisposableArray',
+        },
+      ],
+      options: [{ ignoreVoid: false }],
+    },
+    // Tuple shape: `[Disposable, Disposable]` — element-aware detection still
+    // fires even though the type is a tuple, not an array.
+    {
+      code: `
+declare function makeResource(): Disposable;
+function f() {
+  const pair: [Disposable, Disposable] = [makeResource(), makeResource()];
+}
+      `,
+      errors: [
+        {
+          data: { kind: 'const', memberName: 'pair' },
+          messageId: 'arrayDeclarationContainsDisposables',
+        },
+      ],
+    },
   ],
 });
 
@@ -949,6 +1064,34 @@ class Owner {
         code: `
 class Plain {
   private name = 'x';
+}
+      `,
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // `Owned<T>[]` field — element type has no `Symbol.dispose`, so it's
+      // not detected as a disposable collection. Companion to the user-side
+      // pattern where `stack.use(...)` strips the dispose symbols.
+      {
+        code: `
+type Owned<T> = T extends null | undefined
+  ? T
+  : Omit<T, typeof Symbol.dispose | typeof Symbol.asyncDispose>;
+class Owner {
+  private items: Owned<Disposable>[] = [];
+}
+      `,
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Disposable[] field on a Disposable class — Check 2 skips arrays
+      // (per-element disposal patterns are too varied to verify statically).
+      {
+        code: `
+declare function makeResource(): Disposable;
+class Owner {
+  private items: Disposable[] = [makeResource()];
+  [Symbol.dispose](): void {
+    this.items.forEach(r => r[Symbol.dispose]());
+  }
 }
       `,
         options: [{ checkClassMembers: 'shape-and-dispose' }],
@@ -1085,6 +1228,27 @@ class Owner {
               memberName: '#res',
             },
             messageId: 'classWithDisposableMemberNotDisposable',
+          },
+        ],
+        options: [{ checkClassMembers: 'shape' }],
+      },
+      // Array-of-disposables field in a non-disposable class.
+      {
+        code: `
+declare function makeResource(): Disposable;
+class Owner {
+  private items: Disposable[] = [makeResource()];
+}
+      `,
+        errors: [
+          {
+            data: {
+              className: 'Owner',
+              disposeKey: 'dispose',
+              kind: '',
+              memberName: 'items',
+            },
+            messageId: 'classWithDisposableArrayMemberNotDisposable',
           },
         ],
         options: [{ checkClassMembers: 'shape' }],

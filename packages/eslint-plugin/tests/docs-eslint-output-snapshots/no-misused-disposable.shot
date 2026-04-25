@@ -92,3 +92,25 @@ class Owner {
     this.res[Symbol.dispose]();
   }
 }
+
+Incorrect
+
+declare function makeResource(): Disposable;
+declare const items: number[];
+
+function f() {
+  const handles = items.map(() => makeResource()); // Disposable[] → leak
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ `const handles = ...` holds `Disposable[]` whose elements are not handled. Transfer each via `DisposableStack#use`, return the array, or otherwise hand off ownership.
+}
+
+Correct
+
+declare function makeResource(): Disposable;
+declare const items: number[];
+
+function f() {
+  using stack = new DisposableStack();
+  for (const item of items) {
+    stack.use(makeResource()); // ownership transferred to the stack
+  }
+}
