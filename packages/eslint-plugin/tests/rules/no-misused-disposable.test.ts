@@ -870,6 +870,18 @@ class Owner {
       `,
         options: [{ checkClassMembers: 'shape-and-dispose' }],
       },
+      // Field of type AsyncDisposableStack disposed via the named disposeAsync() method.
+      {
+        code: `
+class Owner {
+  private stack = new AsyncDisposableStack();
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.stack.disposeAsync();
+  }
+}
+      `,
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
       // Constructor parameter property — caller-owned, exempt.
       {
         code: `

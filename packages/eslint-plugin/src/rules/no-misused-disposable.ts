@@ -466,18 +466,28 @@ export default createRule<Options, MessageId>({
             prop.property.name === 'asyncDispose')
         );
       }
-      // Non-computed: `x.dispose()` only counts when `x` is a (Async)DisposableStack.
-      if (
-        member.property.type !== AST_NODE_TYPES.Identifier ||
-        member.property.name !== 'dispose'
-      ) {
+      // Non-computed: `DisposableStack#dispose()` and `AsyncDisposableStack#disposeAsync()`
+      // are the canonical close forms for those built-ins (named methods alongside
+      // the well-known symbols).
+      if (member.property.type !== AST_NODE_TYPES.Identifier) {
         return false;
       }
-      return isBuiltinSymbolLike(
-        services.program,
-        services.getTypeAtLocation(node),
-        ['DisposableStack', 'AsyncDisposableStack'],
-      );
+      const receiverType = services.getTypeAtLocation(node);
+      if (
+        member.property.name === 'dispose' &&
+        isBuiltinSymbolLike(services.program, receiverType, ['DisposableStack'])
+      ) {
+        return true;
+      }
+      if (
+        member.property.name === 'disposeAsync' &&
+        isBuiltinSymbolLike(services.program, receiverType, [
+          'AsyncDisposableStack',
+        ])
+      ) {
+        return true;
+      }
+      return false;
     }
 
     function isExplicitDisposeCall(ref: TSESLint.Scope.Reference): boolean {
