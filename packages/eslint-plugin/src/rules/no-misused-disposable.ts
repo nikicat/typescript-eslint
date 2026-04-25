@@ -259,7 +259,10 @@ export default createRule<Options, MessageId>({
           if (
             declaredVars.some(v =>
               v.references.some(
-                ref => isExplicitDisposeCall(ref) || doesReferenceEscape(ref),
+                ref =>
+                  isExplicitDisposeCall(ref) ||
+                  isIteratorReturnCall(ref) ||
+                  doesReferenceEscape(ref),
               ),
             )
           ) {
@@ -394,6 +397,52 @@ export default createRule<Options, MessageId>({
       return (
         call.type === AST_NODE_TYPES.CallExpression && call.callee === member
       );
+    }
+
+    // A reference of the form `gen.return()` on an iterator/async-iterator
+    // disposes the binding in-place. The TC39 explicit-resource-management
+    // proposal defines `(Async)Generator[Symbol.(async)Dispose]` to call
+    // `return(undefined)`, so a direct `.return()` is the same protocol —
+    // and it's the idiomatic way users close generators today.
+    function isIteratorReturnCall(ref: TSESLint.Scope.Reference): boolean {
+      if (!ref.isRead()) {
+        return false;
+      }
+      const id = ref.identifier;
+      const member = id.parent;
+      if (
+        member.type !== AST_NODE_TYPES.MemberExpression ||
+        member.object !== id ||
+        member.computed ||
+        member.property.type !== AST_NODE_TYPES.Identifier ||
+        member.property.name !== 'return'
+      ) {
+        return false;
+      }
+      const call = member.parent;
+      if (
+        call.type !== AST_NODE_TYPES.CallExpression ||
+        call.callee !== member
+      ) {
+        return false;
+      }
+      const objectType = services.getTypeAtLocation(id);
+      for (const part of tsutils.unionConstituents(
+        checker.getApparentType(objectType),
+      )) {
+        if (
+          tsutils.getWellKnownSymbolPropertyOfType(part, 'iterator', checker) !=
+            null ||
+          tsutils.getWellKnownSymbolPropertyOfType(
+            part,
+            'asyncIterator',
+            checker,
+          ) != null
+        ) {
+          return true;
+        }
+      }
+      return false;
     }
 
     // A reference is treated as an ownership transfer when it reaches a

@@ -304,6 +304,23 @@ async function f() {
   }
 }
     `,
+    // `gen.return()` on an `AsyncGenerator` is the explicit close protocol —
+    // `Symbol.asyncDispose` is defined to call `return(undefined)`.
+    `
+declare function makeAsyncGen(): AsyncGenerator<number>;
+async function f() {
+  const gen = makeAsyncGen();
+  await gen.return(undefined);
+}
+    `,
+    // Same for the sync `Generator`.
+    `
+declare function makeGen(): Generator<number>;
+function f() {
+  const gen = makeGen();
+  gen.return(undefined);
+}
+    `,
   ],
 
   invalid: [
