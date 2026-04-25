@@ -256,7 +256,6 @@ export default createRule<Options, MessageId>({
     const checkClassMembers = options.checkClassMembers ?? 'off';
 
     interface DisposableFieldRecord {
-      isCallerOwned: boolean;
       kind: 'async' | 'sync';
       name: string;
       reportNode: TSESTree.Node;
@@ -1014,7 +1013,6 @@ export default createRule<Options, MessageId>({
             continue;
           }
           disposableFields.push({
-            isCallerOwned: false,
             kind: info.kind,
             name,
             reportNode: member,
@@ -1045,7 +1043,6 @@ export default createRule<Options, MessageId>({
               continue;
             }
             disposableFields.push({
-              isCallerOwned: true,
               kind: info.kind,
               name: inner.name,
               reportNode: param,
@@ -1076,14 +1073,13 @@ export default createRule<Options, MessageId>({
     }
 
     function runClassMemberChecks(frame: ClassFrame): void {
-      const ownedFields = frame.disposableFields.filter(f => !f.isCallerOwned);
-      if (ownedFields.length === 0) {
+      if (frame.disposableFields.length === 0) {
         return;
       }
 
       // Check 1 — class shape.
       if (frame.classDisposableKind == null) {
-        for (const field of ownedFields) {
+        for (const field of frame.disposableFields) {
           context.report({
             node: field.reportNode,
             messageId:
@@ -1101,7 +1097,7 @@ export default createRule<Options, MessageId>({
         return;
       }
       if (frame.classDisposableKind === 'sync') {
-        for (const field of ownedFields) {
+        for (const field of frame.disposableFields) {
           if (field.kind === 'async') {
             context.report({
               node: field.reportNode,
@@ -1119,7 +1115,7 @@ export default createRule<Options, MessageId>({
       if (checkClassMembers !== 'shape-and-dispose') {
         return;
       }
-      for (const field of ownedFields) {
+      for (const field of frame.disposableFields) {
         if (frame.classDisposableKind === 'sync' && field.kind === 'async') {
           // Already reported by Check 1's async-in-sync; don't double up.
           continue;

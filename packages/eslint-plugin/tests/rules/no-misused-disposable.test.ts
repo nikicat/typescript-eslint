@@ -1060,12 +1060,29 @@ class Owner {
       `,
         options: [{ checkClassMembers: 'shape-and-dispose' }],
       },
-      // Constructor parameter property — caller-owned, exempt.
+      // Constructor parameter property — `Borrowed<T>` strips dispose symbols,
+      // so it is no longer detected as a disposable field. This is the
+      // documented escape hatch for "caller retains disposal responsibility".
       {
         code: `
+type Borrowed<T> = T extends null | undefined
+  ? T
+  : Omit<T, typeof Symbol.dispose | typeof Symbol.asyncDispose>;
 declare function makeResource(): Disposable;
 class Owner {
+  constructor(private res: Borrowed<Disposable>) {}
+}
+      `,
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Constructor parameter property released directly inside dispose.
+      {
+        code: `
+class Owner {
   constructor(private res: Disposable) {}
+  [Symbol.dispose](): void {
+    this.res[Symbol.dispose]();
+  }
 }
       `,
         options: [{ checkClassMembers: 'shape-and-dispose' }],
@@ -1315,6 +1332,80 @@ class Owner {
           },
         ],
         options: [{ checkClassMembers: 'shape' }],
+      },
+      // Constructor parameter property on a non-disposable class — same as a
+      // plain field. Caller-retained borrows must use `Borrowed<T>` to opt out.
+      {
+        code: `
+class Owner {
+  constructor(private res: Disposable) {}
+}
+      `,
+        errors: [
+          {
+            data: {
+              className: 'Owner',
+              disposeKey: 'dispose',
+              kind: '',
+              memberName: 'res',
+            },
+            messageId: 'classWithDisposableMemberNotDisposable',
+          },
+        ],
+        options: [{ checkClassMembers: 'shape' }],
+      },
+      // Constructor parameter property of an AsyncDisposable on a sync-only
+      // disposable class — async-in-sync mismatch.
+      {
+        code: `
+class Owner {
+  constructor(private res: AsyncDisposable) {}
+  [Symbol.dispose](): void {}
+}
+      `,
+        errors: [{ messageId: 'asyncMemberInSyncDisposableClass' }],
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Constructor parameter property never referenced in dispose body.
+      {
+        code: `
+class Owner {
+  constructor(private res: Disposable) {}
+  [Symbol.dispose](): void {}
+}
+      `,
+        errors: [
+          {
+            data: { disposeKey: 'dispose', kind: '', memberName: 'res' },
+            messageId: 'classMemberNotDisposed',
+          },
+        ],
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Constructor parameter property transferred to a stack at construction
+      // time but never referenced in dispose body. Per the documented Check 2
+      // limitation, the constructor-body `stack.use(...)` doesn't count;
+      // dispose must reference `this.res` (or the field must be typed
+      // `Borrowed<T>`).
+      {
+        code: `
+class Owner {
+  private stack = new DisposableStack();
+  constructor(private res: Disposable) {
+    this.stack.use(res);
+  }
+  [Symbol.dispose](): void {
+    this.stack.dispose();
+  }
+}
+      `,
+        errors: [
+          {
+            data: { disposeKey: 'dispose', kind: '', memberName: 'res' },
+            messageId: 'classMemberNotDisposed',
+          },
+        ],
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
       },
     ],
   },

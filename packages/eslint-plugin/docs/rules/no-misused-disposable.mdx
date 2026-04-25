@@ -213,7 +213,7 @@ class Owner {
 </TabItem>
 </Tabs>
 
-Constructor parameter properties (`constructor(private res: Disposable)`) are treated as caller-owned and exempt — the resource was created elsewhere and the caller is responsible for it. Static fields are also exempt since they share the module's lifetime.
+Constructor parameter properties (`constructor(private res: Disposable)`) are checked the same as plain fields — they desugar to a field declaration plus a `this.res = res` assignment, so there is no semantic difference. To express that a parameter is borrowed and the caller retains disposal responsibility, type the parameter as `Borrowed<T>` (the [companion pattern](#collections-of-disposables) that strips the dispose symbols) so it is no longer detected as a disposable field. Static fields are exempt since they share the module's lifetime.
 
 Limitations of `'shape-and-dispose'`:
 
