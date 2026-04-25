@@ -322,17 +322,17 @@ function f() {
 }
     `,
     // Array whose element type has been stripped of `Symbol.dispose` (e.g.,
-    // returned from a `stack.use(...)` augmentation that returns `Owned<T>`).
+    // returned from a `stack.use(...)` augmentation that returns `Borrowed<T>`).
     // No element carries the dispose protocol, so the array doesn't trigger
     // the collection-of-disposables check.
     `
-type Owned<T> = T extends null | undefined
+type Borrowed<T> = T extends null | undefined
   ? T
   : Omit<T, typeof Symbol.dispose | typeof Symbol.asyncDispose>;
-declare function makeOwnedResource(): Owned<Disposable>;
+declare function borrowResource(): Borrowed<Disposable>;
 declare const items: number[];
 {
-  const handles = items.map(() => makeOwnedResource());
+  const handles = items.map(() => borrowResource());
   handles;
 }
     `,
@@ -1131,16 +1131,16 @@ class Plain {
       `,
         options: [{ checkClassMembers: 'shape-and-dispose' }],
       },
-      // `Owned<T>[]` field — element type has no `Symbol.dispose`, so it's
+      // `Borrowed<T>[]` field — element type has no `Symbol.dispose`, so it's
       // not detected as a disposable collection. Companion to the user-side
       // pattern where `stack.use(...)` strips the dispose symbols.
       {
         code: `
-type Owned<T> = T extends null | undefined
+type Borrowed<T> = T extends null | undefined
   ? T
   : Omit<T, typeof Symbol.dispose | typeof Symbol.asyncDispose>;
 class Owner {
-  private items: Owned<Disposable>[] = [];
+  private items: Borrowed<Disposable>[] = [];
 }
       `,
         options: [{ checkClassMembers: 'shape-and-dispose' }],

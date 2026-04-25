@@ -87,9 +87,9 @@ function getDisposableKind(
 // Returns the resource kind plus the shape ('value' for direct disposables,
 // 'array' for `T[]` / tuples whose elements carry the dispose protocol). Used
 // to flag e.g. `items.map(makeResource)` (`Disposable[]`) the same as a single
-// floating `Disposable`. With the `Owned<T>` pattern in user code that strips
+// floating `Disposable`. With the `Borrowed<T>` pattern in user code that strips
 // the dispose symbols on transfer, `items.map(item => stack.use(makeResource(item)))`
-// types as `Owned<Disposable>[]` and naturally falls through.
+// types as `Borrowed<Disposable>[]` and naturally falls through.
 function getDisposableInfo(
   type: ts.Type,
   checker: ts.TypeChecker,
