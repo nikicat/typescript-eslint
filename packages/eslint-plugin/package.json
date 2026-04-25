@@ -1,6 +1,6 @@
 {
-  "name": "@typescript-eslint/eslint-plugin",
-  "version": "8.59.0",
+  "name": "typescript-eslint-plugin-no-misused-disposable",
+  "version": "8.60.0-disposable.3",
   "description": "TypeScript plugin for ESLint",
   "files": [
     "dist",
