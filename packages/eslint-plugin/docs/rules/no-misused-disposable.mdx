@@ -175,6 +175,52 @@ Recent host typings (Node.js 20+, Deno 2+) attach `Symbol.dispose` to the handle
 }
 ```
 
+### `checkClassMembers`
+
+{/* insert option description */}
+
+Default: `'off'`. Controls whether the rule also tracks disposable resources stored as class fields. Three modes:
+
+- `'off'` — only statement-level checks run (default; preserves pre-8.60 behavior).
+- `'shape'` — a class that holds a `Disposable` / `AsyncDisposable` field must itself implement the matching well-known method (or inherit it). Sync-only classes with an `AsyncDisposable` field are also reported.
+- `'shape-and-dispose'` — additionally requires every disposable field to be released in the dispose method body (via `[Symbol.dispose]()`, iterator `.return()`, ownership transfer to a stack, or any other recognized escape).
+
+This option is opt-in because retrofitting it on existing codebases will surface real but historically tolerated leaks. Land `'shape'` first, fix the structural issues, then bump to `'shape-and-dispose'`.
+
+<Tabs>
+<TabItem value="❌ Incorrect">
+
+```ts option='{"checkClassMembers":"shape-and-dispose"}'
+declare function makeResource(): Disposable;
+class Owner {
+  private res: Disposable = makeResource();
+}
+```
+
+</TabItem>
+<TabItem value="✅ Correct">
+
+```ts option='{"checkClassMembers":"shape-and-dispose"}'
+declare function makeResource(): Disposable;
+class Owner {
+  private res: Disposable = makeResource();
+  [Symbol.dispose](): void {
+    this.res[Symbol.dispose]();
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+Constructor parameter properties (`constructor(private res: Disposable)`) are treated as caller-owned and exempt — the resource was created elsewhere and the caller is responsible for it. Static fields are also exempt since they share the module's lifetime.
+
+Limitations of `'shape-and-dispose'`:
+
+- No control-flow analysis: a field disposed in only one branch of `[Symbol.dispose]` is treated as disposed.
+- No subclass enforcement: a subclass that adds a new disposable field while inheriting the parent's dispose method is not flagged.
+- A field initialized via `this.stack.use(makeResource())` still requires explicit handling in dispose; the `use` recognition only fires at the assignment site.
+
 ## When Not To Use It
 
 If your project does not use explicit resource management, you do not need this rule.
@@ -183,7 +229,7 @@ A `const` / `let` / `var` binding is treated as handled when any read reference 
 
 Known limitations where you may still see false positives:
 
-- Class-field assignment from a constructor or method body — escape analysis does not follow control flow through `this`.
+- Class-field assignment from a constructor or method body — statement-level escape analysis does not follow control flow through `this`. Enable [`checkClassMembers`](#checkclassmembers) to enforce class-level disposal contracts instead.
 - Ownership transfer via custom helpers whose parameter type is not itself `Disposable` — the `allowForKnownSafeCalls` / `allowForKnownSafeDisposables` options are the intended escape hatches.
 - Bare calls to host APIs whose return types carry `Symbol.dispose` (for example, `setTimeout` in recent Node types) — configure them via `allowForKnownSafeCalls`. The built-in `DisposableStack#use` / `#adopt` and `AsyncDisposableStack#use` / `#adopt` passthrough methods are recognized out of the box.
 

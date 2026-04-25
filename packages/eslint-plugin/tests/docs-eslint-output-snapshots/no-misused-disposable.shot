@@ -72,3 +72,23 @@ Options: {"allowForKnownSafeCalls":[{"from":"file","name":"safe"}]}
 
 declare function safe(): Disposable;
 safe();
+
+Incorrect
+Options: {"checkClassMembers":"shape-and-dispose"}
+
+declare function makeResource(): Disposable;
+class Owner {
+  private res: Disposable = makeResource();
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Class `Owner` has a `Disposable` member `res` but does not implement `[Symbol.dispose]()`. The held resource will leak when the instance is discarded.
+}
+
+Correct
+Options: {"checkClassMembers":"shape-and-dispose"}
+
+declare function makeResource(): Disposable;
+class Owner {
+  private res: Disposable = makeResource();
+  [Symbol.dispose](): void {
+    this.res[Symbol.dispose]();
+  }
+}

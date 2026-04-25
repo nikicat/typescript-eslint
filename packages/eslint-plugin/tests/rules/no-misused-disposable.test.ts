@@ -826,3 +826,257 @@ function f() {
     },
   ],
 });
+
+ruleTester.run(
+  'no-misused-disposable (checkClassMembers: shape-and-dispose)',
+  rule,
+  {
+    valid: [
+      // Class implements [Symbol.dispose] and disposes its disposable field.
+      {
+        code: `
+declare function makeResource(): Disposable;
+class Owner {
+  private res: Disposable = makeResource();
+  [Symbol.dispose](): void {
+    this.res[Symbol.dispose]();
+  }
+}
+      `,
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Async-disposable class disposing an async-disposable field.
+      {
+        code: `
+declare function makeAsyncResource(): AsyncDisposable;
+class Owner {
+  private res: AsyncDisposable = makeAsyncResource();
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.res[Symbol.asyncDispose]();
+  }
+}
+      `,
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Field of type DisposableStack disposed via the named dispose() method.
+      {
+        code: `
+class Owner {
+  private stack = new DisposableStack();
+  [Symbol.dispose](): void {
+    this.stack.dispose();
+  }
+}
+      `,
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Constructor parameter property — caller-owned, exempt.
+      {
+        code: `
+declare function makeResource(): Disposable;
+class Owner {
+  constructor(private res: Disposable) {}
+}
+      `,
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Static disposable field — exempt.
+      {
+        code: `
+declare function makeResource(): Disposable;
+class Owner {
+  static shared: Disposable = makeResource();
+}
+      `,
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Field transferred to a stack inside dispose — counts as escape.
+      {
+        code: `
+declare function makeAsyncResource(): AsyncDisposable;
+class Owner {
+  private res: AsyncDisposable = makeAsyncResource();
+  private stack = new AsyncDisposableStack();
+  async [Symbol.asyncDispose](): Promise<void> {
+    this.stack.use(this.res);
+    await this.stack[Symbol.asyncDispose]();
+  }
+}
+      `,
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Sync-disposable field released inside [Symbol.asyncDispose] only.
+      {
+        code: `
+declare function makeResource(): Disposable;
+class Owner {
+  private res: Disposable = makeResource();
+  async [Symbol.asyncDispose](): Promise<void> {
+    this.res[Symbol.dispose]();
+  }
+}
+      `,
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Local alias to this.foo whose binding type is `Disposable` — counts as escape.
+      {
+        code: `
+declare function makeResource(): Disposable;
+class Owner {
+  private res: Disposable = makeResource();
+  [Symbol.dispose](): void {
+    const r: Disposable = this.res;
+    r[Symbol.dispose]();
+  }
+}
+      `,
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Class with no disposable members — never reported.
+      {
+        code: `
+class Plain {
+  private name = 'x';
+}
+      `,
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Default behavior (option off) — still no report.
+      `
+declare function makeResource(): Disposable;
+class Owner {
+  private res: Disposable = makeResource();
+}
+    `,
+    ],
+
+    invalid: [
+      // Plain class holding a Disposable field — must be Disposable.
+      {
+        code: `
+declare function makeResource(): Disposable;
+class Owner {
+  private res: Disposable = makeResource();
+}
+      `,
+        errors: [{ messageId: 'classWithDisposableMemberNotDisposable' }],
+        options: [{ checkClassMembers: 'shape' }],
+      },
+      // Disposable class with two fields — only one disposed.
+      {
+        code: `
+declare function makeResource(): Disposable;
+class Owner {
+  private a: Disposable = makeResource();
+  private b: Disposable = makeResource();
+  [Symbol.dispose](): void {
+    this.a[Symbol.dispose]();
+  }
+}
+      `,
+        errors: [
+          {
+            data: { kind: '', memberName: 'b', disposeKey: 'dispose' },
+            messageId: 'classMemberNotDisposed',
+          },
+        ],
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Sync-only disposable class with an async-disposable field.
+      {
+        code: `
+declare function makeAsyncResource(): AsyncDisposable;
+class Owner {
+  private res: AsyncDisposable = makeAsyncResource();
+  [Symbol.dispose](): void {}
+}
+      `,
+        errors: [{ messageId: 'asyncMemberInSyncDisposableClass' }],
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Field referenced only by a non-disposable destination.
+      {
+        code: `
+declare function makeResource(): Disposable;
+declare function log(_: unknown): void;
+class Owner {
+  private res: Disposable = makeResource();
+  [Symbol.dispose](): void {
+    log(this.res);
+  }
+}
+      `,
+        errors: [{ messageId: 'classMemberNotDisposed' }],
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Field referenced only by reassignment in dispose.
+      {
+        code: `
+declare function makeResource(): Disposable;
+class Owner {
+  private res: Disposable = makeResource();
+  [Symbol.dispose](): void {
+    this.res = undefined!;
+  }
+}
+      `,
+        errors: [{ messageId: 'classMemberNotDisposed' }],
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Class with [Symbol.asyncDispose] only and a Disposable field never referenced.
+      {
+        code: `
+declare function makeResource(): Disposable;
+class Owner {
+  private res: Disposable = makeResource();
+  async [Symbol.asyncDispose](): Promise<void> {}
+}
+      `,
+        errors: [{ messageId: 'classMemberNotDisposed' }],
+        options: [{ checkClassMembers: 'shape-and-dispose' }],
+      },
+      // Anonymous class expression with a leaking field.
+      {
+        code: `
+declare function makeResource(): Disposable;
+const C = class {
+  private res: Disposable = makeResource();
+};
+      `,
+        errors: [
+          {
+            data: {
+              className: '<anonymous class>',
+              disposeKey: 'dispose',
+              kind: '',
+              memberName: 'res',
+            },
+            messageId: 'classWithDisposableMemberNotDisposable',
+          },
+        ],
+        options: [{ checkClassMembers: 'shape' }],
+      },
+      // Private-identifier field in a non-disposable class.
+      {
+        code: `
+declare function makeResource(): Disposable;
+class Owner {
+  #res: Disposable = makeResource();
+}
+      `,
+        errors: [
+          {
+            data: {
+              className: 'Owner',
+              disposeKey: 'dispose',
+              kind: '',
+              memberName: '#res',
+            },
+            messageId: 'classWithDisposableMemberNotDisposable',
+          },
+        ],
+        options: [{ checkClassMembers: 'shape' }],
+      },
+    ],
+  },
+);

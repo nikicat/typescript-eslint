@@ -27,11 +27,15 @@ export type Options = [
   {
     allowForKnownSafeCalls?: TypeOrValueSpecifier[];
     allowForKnownSafeDisposables?: TypeOrValueSpecifier[];
+    checkClassMembers?: 'off' | 'shape' | 'shape-and-dispose';
     ignoreVoid?: boolean;
   },
 ];
 
 export type MessageId =
+  | 'asyncMemberInSyncDisposableClass'
+  | 'classMemberNotDisposed'
+  | 'classWithDisposableMemberNotDisposable'
   | 'floatingAsyncDisposable'
   | 'floatingAsyncDisposableVoid'
   | 'floatingDisposable'
@@ -90,6 +94,12 @@ export default createRule<Options, MessageId>({
     },
     hasSuggestions: true,
     messages: {
+      asyncMemberInSyncDisposableClass:
+        '`AsyncDisposable` member `{{memberName}}` cannot be released by sync `[Symbol.dispose]()` on `{{className}}`. Implement `[Symbol.asyncDispose]()` instead.',
+      classMemberNotDisposed:
+        '`{{kind}}Disposable` member `{{memberName}}` is never disposed in `[Symbol.{{disposeKey}}]()`. Call `this.{{memberName}}[Symbol.{{disposeKey}}]()`, transfer ownership (e.g. `stack.use(this.{{memberName}})`), or remove the field.',
+      classWithDisposableMemberNotDisposable:
+        'Class `{{className}}` has a `{{kind}}Disposable` member `{{memberName}}` but does not implement `[Symbol.{{disposeKey}}]()`. The held resource will leak when the instance is discarded.',
       floatingAsyncDisposable: messageBaseAsyncDisposable,
       floatingAsyncDisposableVoid: messageBaseAsyncDisposableVoid,
       floatingDisposable: messageBaseDisposable,
@@ -117,6 +127,16 @@ export default createRule<Options, MessageId>({
             description:
               'Type specifiers of disposable types that are safe to float.',
           },
+          checkClassMembers: {
+            type: 'string',
+            enum: ['off', 'shape', 'shape-and-dispose'],
+            description:
+              'Whether to also check class fields for disposable misuse. ' +
+              '`shape` requires classes that hold disposable members to implement ' +
+              '`[Symbol.dispose]`/`[Symbol.asyncDispose]`. ' +
+              '`shape-and-dispose` additionally requires the dispose method to ' +
+              'release each disposable member. Default `off`.',
+          },
           ignoreVoid: {
             type: 'boolean',
             description: 'Whether to ignore `void` expressions.',
@@ -129,6 +149,7 @@ export default createRule<Options, MessageId>({
     {
       allowForKnownSafeCalls: readonlynessOptionsDefaults.allow,
       allowForKnownSafeDisposables: readonlynessOptionsDefaults.allow,
+      checkClassMembers: 'off',
       ignoreVoid: true,
     },
   ],
@@ -142,8 +163,54 @@ export default createRule<Options, MessageId>({
     const allowForKnownSafeCalls = options.allowForKnownSafeCalls!;
     const allowForKnownSafeDisposables = options.allowForKnownSafeDisposables!;
     /* eslint-enable @typescript-eslint/no-non-null-assertion */
+    const checkClassMembers = options.checkClassMembers ?? 'off';
+
+    interface DisposableFieldRecord {
+      isCallerOwned: boolean;
+      kind: 'async' | 'sync';
+      name: string;
+      reportNode: TSESTree.Node;
+    }
+
+    interface ClassFrame {
+      asyncDisposeMethod?: TSESTree.MethodDefinition;
+      classDisposableKind: DisposableKind;
+      className: string;
+      disposableFields: DisposableFieldRecord[];
+      node: TSESTree.ClassDeclaration | TSESTree.ClassExpression;
+      syncDisposeMethod?: TSESTree.MethodDefinition;
+    }
+
+    const classStack: ClassFrame[] = [];
+
+    function enterClass(
+      node: TSESTree.ClassDeclaration | TSESTree.ClassExpression,
+    ): void {
+      if (checkClassMembers === 'off' || node.declare) {
+        return;
+      }
+      classStack.push(buildClassFrame(node));
+    }
+
+    function exitClass(
+      node: TSESTree.ClassDeclaration | TSESTree.ClassExpression,
+    ): void {
+      if (checkClassMembers === 'off' || node.declare) {
+        return;
+      }
+      const frame = classStack.pop();
+      if (frame == null || frame.node !== node) {
+        return;
+      }
+      runClassMemberChecks(frame);
+    }
 
     return {
+      ClassDeclaration: enterClass,
+      'ClassDeclaration:exit': exitClass,
+      ClassExpression: enterClass,
+      'ClassExpression:exit': exitClass,
+
       ExpressionStatement(node): void {
         const expression = skipChainExpression(node.expression);
 
@@ -368,35 +435,53 @@ export default createRule<Options, MessageId>({
     // `x[Symbol.asyncDispose]()` disposes the binding in-place — the resource
     // is released, not leaked. Match this syntactically so we don't have to
     // resolve the well-known symbol at the type-checker level.
-    function isExplicitDisposeCall(ref: TSESLint.Scope.Reference): boolean {
-      if (!ref.isRead()) {
-        return false;
-      }
-      const id = ref.identifier;
-      const member = id.parent;
+    //
+    // `(Async)DisposableStack` also exposes a *named* `dispose()` method that
+    // is the canonical close form for the stack itself; recognize it when the
+    // receiver type is one of those built-ins.
+    function isExplicitDisposeCallOnNode(node: TSESTree.Node): boolean {
+      const member = node.parent;
       if (
-        member.type !== AST_NODE_TYPES.MemberExpression ||
-        member.object !== id ||
-        !member.computed
-      ) {
-        return false;
-      }
-      const prop = member.property;
-      if (
-        prop.type !== AST_NODE_TYPES.MemberExpression ||
-        prop.computed ||
-        prop.object.type !== AST_NODE_TYPES.Identifier ||
-        prop.object.name !== 'Symbol' ||
-        prop.property.type !== AST_NODE_TYPES.Identifier ||
-        (prop.property.name !== 'dispose' &&
-          prop.property.name !== 'asyncDispose')
+        member?.type !== AST_NODE_TYPES.MemberExpression ||
+        member.object !== node
       ) {
         return false;
       }
       const call = member.parent;
-      return (
-        call.type === AST_NODE_TYPES.CallExpression && call.callee === member
+      if (
+        call?.type !== AST_NODE_TYPES.CallExpression ||
+        call.callee !== member
+      ) {
+        return false;
+      }
+      if (member.computed) {
+        const prop = member.property;
+        return (
+          prop.type === AST_NODE_TYPES.MemberExpression &&
+          !prop.computed &&
+          prop.object.type === AST_NODE_TYPES.Identifier &&
+          prop.object.name === 'Symbol' &&
+          prop.property.type === AST_NODE_TYPES.Identifier &&
+          (prop.property.name === 'dispose' ||
+            prop.property.name === 'asyncDispose')
+        );
+      }
+      // Non-computed: `x.dispose()` only counts when `x` is a (Async)DisposableStack.
+      if (
+        member.property.type !== AST_NODE_TYPES.Identifier ||
+        member.property.name !== 'dispose'
+      ) {
+        return false;
+      }
+      return isBuiltinSymbolLike(
+        services.program,
+        services.getTypeAtLocation(node),
+        ['DisposableStack', 'AsyncDisposableStack'],
       );
+    }
+
+    function isExplicitDisposeCall(ref: TSESLint.Scope.Reference): boolean {
+      return ref.isRead() && isExplicitDisposeCallOnNode(ref.identifier);
     }
 
     // A reference of the form `gen.return()` on an iterator/async-iterator
@@ -404,15 +489,11 @@ export default createRule<Options, MessageId>({
     // proposal defines `(Async)Generator[Symbol.(async)Dispose]` to call
     // `return(undefined)`, so a direct `.return()` is the same protocol —
     // and it's the idiomatic way users close generators today.
-    function isIteratorReturnCall(ref: TSESLint.Scope.Reference): boolean {
-      if (!ref.isRead()) {
-        return false;
-      }
-      const id = ref.identifier;
-      const member = id.parent;
+    function isIteratorReturnCallOnNode(node: TSESTree.Node): boolean {
+      const member = node.parent;
       if (
-        member.type !== AST_NODE_TYPES.MemberExpression ||
-        member.object !== id ||
+        member?.type !== AST_NODE_TYPES.MemberExpression ||
+        member.object !== node ||
         member.computed ||
         member.property.type !== AST_NODE_TYPES.Identifier ||
         member.property.name !== 'return'
@@ -421,12 +502,12 @@ export default createRule<Options, MessageId>({
       }
       const call = member.parent;
       if (
-        call.type !== AST_NODE_TYPES.CallExpression ||
+        call?.type !== AST_NODE_TYPES.CallExpression ||
         call.callee !== member
       ) {
         return false;
       }
-      const objectType = services.getTypeAtLocation(id);
+      const objectType = services.getTypeAtLocation(node);
       for (const part of tsutils.unionConstituents(
         checker.getApparentType(objectType),
       )) {
@@ -445,15 +526,35 @@ export default createRule<Options, MessageId>({
       return false;
     }
 
+    function isIteratorReturnCall(ref: TSESLint.Scope.Reference): boolean {
+      return ref.isRead() && isIteratorReturnCallOnNode(ref.identifier);
+    }
+
+    // Aggregate "this `this.foo` MemberExpression read counts as disposal
+    // of the underlying field" check, used by Check 2 of class-member tracking.
+    function isMemberExpressionHandled(
+      member: TSESTree.MemberExpression,
+    ): boolean {
+      return (
+        isExplicitDisposeCallOnNode(member) ||
+        isIteratorReturnCallOnNode(member) ||
+        walkEscape(member)
+      );
+    }
+
     // A reference is treated as an ownership transfer when it reaches a
     // destination whose type still carries `Disposable`/`AsyncDisposable`.
     // Non-disposable destinations (e.g. `console.log(x: unknown)`) leave the
     // resource orphaned, so they are not treated as escape.
     function doesReferenceEscape(ref: TSESLint.Scope.Reference): boolean {
-      if (!ref.isRead()) {
-        return false;
-      }
-      let node: TSESTree.Node = ref.identifier;
+      return ref.isRead() && walkEscape(ref.identifier);
+    }
+
+    // Same parent-walk as `doesReferenceEscape`, but anchored on an arbitrary
+    // node — used to ask "does this `this.foo` MemberExpression escape?"
+    // when classifying class-member reads inside a dispose method.
+    function walkEscape(start: TSESTree.Node): boolean {
+      let node: TSESTree.Node = start;
       let parent = node.parent as TSESTree.Node | undefined;
       while (parent) {
         switch (parent.type) {
@@ -638,6 +739,296 @@ export default createRule<Options, MessageId>({
       }
 
       return getDisposableKind(type, checker);
+    }
+
+    // ---- class-member tracking ----------------------------------------
+
+    function getMemberKeyName(key: TSESTree.Node): string | null {
+      if (key.type === AST_NODE_TYPES.Identifier) {
+        return key.name;
+      }
+      if (key.type === AST_NODE_TYPES.PrivateIdentifier) {
+        return `#${key.name}`;
+      }
+      if (
+        key.type === AST_NODE_TYPES.Literal &&
+        typeof key.value === 'string'
+      ) {
+        return key.value;
+      }
+      return null;
+    }
+
+    function getDisposeMethodKind(
+      method: TSESTree.MethodDefinition,
+    ): DisposableKind {
+      if (!method.computed) {
+        return null;
+      }
+      const key = method.key;
+      if (
+        key.type !== AST_NODE_TYPES.MemberExpression ||
+        key.computed ||
+        key.object.type !== AST_NODE_TYPES.Identifier ||
+        key.object.name !== 'Symbol' ||
+        key.property.type !== AST_NODE_TYPES.Identifier
+      ) {
+        return null;
+      }
+      if (key.property.name === 'asyncDispose') {
+        return 'async';
+      }
+      if (key.property.name === 'dispose') {
+        return 'sync';
+      }
+      return null;
+    }
+
+    function buildClassFrame(
+      node: TSESTree.ClassDeclaration | TSESTree.ClassExpression,
+    ): ClassFrame {
+      const className = node.id?.name ?? '<anonymous class>';
+      const classType = services.getTypeAtLocation(node);
+      const instanceType =
+        classType.getConstructSignatures().at(0)?.getReturnType() ?? classType;
+      const classDisposableKind = getDisposableKind(instanceType, checker);
+
+      const disposableFields: DisposableFieldRecord[] = [];
+      let syncDisposeMethod: TSESTree.MethodDefinition | undefined;
+      let asyncDisposeMethod: TSESTree.MethodDefinition | undefined;
+
+      for (const member of node.body.body) {
+        if (
+          member.type === AST_NODE_TYPES.PropertyDefinition ||
+          member.type === AST_NODE_TYPES.AccessorProperty
+        ) {
+          if (member.static) {
+            continue;
+          }
+          const name = getMemberKeyName(member.key);
+          if (name == null) {
+            continue;
+          }
+          const kind = getDisposableKind(
+            services.getTypeAtLocation(member),
+            checker,
+          );
+          if (kind == null) {
+            continue;
+          }
+          disposableFields.push({
+            isCallerOwned: false,
+            kind,
+            name,
+            reportNode: member,
+          });
+          continue;
+        }
+        if (member.type !== AST_NODE_TYPES.MethodDefinition) {
+          continue;
+        }
+        if (member.kind === 'constructor') {
+          for (const param of member.value.params) {
+            if (param.type !== AST_NODE_TYPES.TSParameterProperty) {
+              continue;
+            }
+            const inner =
+              param.parameter.type === AST_NODE_TYPES.AssignmentPattern
+                ? param.parameter.left
+                : param.parameter;
+            if (inner.type !== AST_NODE_TYPES.Identifier) {
+              continue;
+            }
+            const kind = getDisposableKind(
+              services.getTypeAtLocation(inner),
+              checker,
+            );
+            if (kind == null) {
+              continue;
+            }
+            disposableFields.push({
+              isCallerOwned: true,
+              kind,
+              name: inner.name,
+              reportNode: param,
+            });
+          }
+          continue;
+        }
+        if (member.static) {
+          continue;
+        }
+        const disposeKind = getDisposeMethodKind(member);
+        if (disposeKind === 'sync') {
+          syncDisposeMethod = member;
+        } else if (disposeKind === 'async') {
+          asyncDisposeMethod = member;
+        }
+      }
+
+      return {
+        asyncDisposeMethod,
+        classDisposableKind,
+        className,
+        disposableFields,
+        node,
+        syncDisposeMethod,
+      };
+    }
+
+    function runClassMemberChecks(frame: ClassFrame): void {
+      const ownedFields = frame.disposableFields.filter(f => !f.isCallerOwned);
+      if (ownedFields.length === 0) {
+        return;
+      }
+
+      // Check 1 — class shape.
+      if (frame.classDisposableKind == null) {
+        for (const field of ownedFields) {
+          context.report({
+            node: field.reportNode,
+            messageId: 'classWithDisposableMemberNotDisposable',
+            data: {
+              className: frame.className,
+              disposeKey: field.kind === 'async' ? 'asyncDispose' : 'dispose',
+              kind: field.kind === 'async' ? 'Async' : '',
+              memberName: field.name,
+            },
+          });
+        }
+        return;
+      }
+      if (frame.classDisposableKind === 'sync') {
+        for (const field of ownedFields) {
+          if (field.kind === 'async') {
+            context.report({
+              node: field.reportNode,
+              messageId: 'asyncMemberInSyncDisposableClass',
+              data: {
+                className: frame.className,
+                memberName: field.name,
+              },
+            });
+          }
+        }
+      }
+
+      // Check 2 — member disposed inside dispose method body.
+      if (checkClassMembers !== 'shape-and-dispose') {
+        return;
+      }
+      for (const field of ownedFields) {
+        if (frame.classDisposableKind === 'sync' && field.kind === 'async') {
+          // Already reported by Check 1's async-in-sync; don't double up.
+          continue;
+        }
+        const candidates: TSESTree.MethodDefinition[] = [];
+        if (frame.asyncDisposeMethod != null) {
+          candidates.push(frame.asyncDisposeMethod);
+        }
+        if (field.kind === 'sync' && frame.syncDisposeMethod != null) {
+          candidates.push(frame.syncDisposeMethod);
+        }
+        if (candidates.length === 0) {
+          continue;
+        }
+        const handled = candidates.some(method =>
+          isFieldHandledInMethod(method, field.name, frame.node),
+        );
+        if (!handled) {
+          context.report({
+            node: field.reportNode,
+            messageId: 'classMemberNotDisposed',
+            data: {
+              disposeKey: field.kind === 'async' ? 'asyncDispose' : 'dispose',
+              kind: field.kind === 'async' ? 'Async' : '',
+              memberName: field.name,
+            },
+          });
+        }
+      }
+    }
+
+    function isFieldHandledInMethod(
+      method: TSESTree.MethodDefinition,
+      fieldName: string,
+      classNode: TSESTree.ClassDeclaration | TSESTree.ClassExpression,
+    ): boolean {
+      if (method.value.body == null) {
+        return false;
+      }
+      let handled = false;
+      walkPreservingThis(method.value.body, classNode, node => {
+        if (handled) {
+          return;
+        }
+        if (
+          node.type === AST_NODE_TYPES.MemberExpression &&
+          node.object.type === AST_NODE_TYPES.ThisExpression &&
+          getMemberKeyName(node.property) === fieldName &&
+          isMemberExpressionHandled(node)
+        ) {
+          handled = true;
+        }
+      });
+      return handled;
+    }
+
+    // Walks `start`'s subtree, skipping descendants whose `this` differs from
+    // the class instance (regular function bodies, inner class bodies). Arrow
+    // functions inherit `this`, so we recurse into them.
+    function walkPreservingThis(
+      start: TSESTree.Node,
+      classNode: TSESTree.ClassDeclaration | TSESTree.ClassExpression,
+      visit: (n: TSESTree.Node) => void,
+    ): void {
+      const worklist: TSESTree.Node[] = [start];
+      while (worklist.length > 0) {
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        const node = worklist.pop()!;
+        visit(node);
+        if (
+          node.type === AST_NODE_TYPES.FunctionDeclaration ||
+          node.type === AST_NODE_TYPES.FunctionExpression
+        ) {
+          continue;
+        }
+        if (
+          (node.type === AST_NODE_TYPES.ClassDeclaration ||
+            node.type === AST_NODE_TYPES.ClassExpression) &&
+          node !== classNode
+        ) {
+          continue;
+        }
+        for (const key of Object.keys(node) as (keyof typeof node)[]) {
+          if (
+            key === 'parent' ||
+            key === 'loc' ||
+            key === 'range' ||
+            key === 'type'
+          ) {
+            continue;
+          }
+          const value: unknown = node[key];
+          if (Array.isArray(value)) {
+            for (const child of value) {
+              if (
+                child != null &&
+                typeof child === 'object' &&
+                'type' in (child as object)
+              ) {
+                worklist.push(child as TSESTree.Node);
+              }
+            }
+          } else if (
+            value != null &&
+            typeof value === 'object' &&
+            'type' in (value as object)
+          ) {
+            worklist.push(value as TSESTree.Node);
+          }
+        }
+      }
     }
   },
 });

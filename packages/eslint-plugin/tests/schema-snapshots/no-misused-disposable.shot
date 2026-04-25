@@ -195,6 +195,11 @@
         },
         "type": "array"
       },
+      "checkClassMembers": {
+        "description": "Whether to also check class fields for disposable misuse. `shape` requires classes that hold disposable members to implement `[Symbol.dispose]`/`[Symbol.asyncDispose]`. `shape-and-dispose` additionally requires the dispose method to release each disposable member. Default `off`.",
+        "enum": ["off", "shape", "shape-and-dispose"],
+        "type": "string"
+      },
       "ignoreVoid": {
         "description": "Whether to ignore `void` expressions.",
         "type": "boolean"
@@ -245,6 +250,12 @@ type Options = [
         }
       | string
     )[];
+    /** Whether to also check class fields for disposable misuse. `shape` requires classes that hold disposable members to implement `[Symbol.dispose]`/`[Symbol.asyncDispose]`. `shape-and-dispose` additionally requires the dispose method to release each disposable member. Default `off`. */
+    checkClassMembers?:
+      | 'shape'
+      | 'shape-and-dispose'
+      /** Whether to also check class fields for disposable misuse. `shape` requires classes that hold disposable members to implement `[Symbol.dispose]`/`[Symbol.asyncDispose]`. `shape-and-dispose` additionally requires the dispose method to release each disposable member. Default `off`. */
+      | 'off';
     /** Whether to ignore `void` expressions. */
     ignoreVoid?: boolean;
   },
