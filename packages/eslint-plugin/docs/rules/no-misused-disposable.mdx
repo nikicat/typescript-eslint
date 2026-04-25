@@ -257,6 +257,8 @@ function f() {
 
 The TC39 proposal's prescribed primitive for "collection of disposables" is `(Async)DisposableStack`. The rule recognizes the canonical `stack.use(…)` / `stack.adopt(…)` transfer at any call site.
 
+Array-shape values can also escape into a function whose parameter is an `Iterable<…>` / `AsyncIterable<…>` (e.g. a project helper `function useAll(stack, items: Iterable<AsyncDisposable>)` that iterates and registers each element). Passing an array into a parameter that's _itself_ typed `T[]` / `Array<T>` / a tuple is treated as opaque storage handoff and remains flagged — the receiver may store and never dispose, and the caller has no way to verify. Returning `T[]` from a function is treated the same way (the caller can't `using`-bind an array). If you have a helper that genuinely consumes an array of disposables, declare its parameter as `Iterable<T>` rather than `T[]`.
+
 If you also augment `(Async)DisposableStack#use` to return `Owned<T>` (a type that strips `Symbol.dispose` / `Symbol.asyncDispose`), then `items.map(item => stack.use(makeResource(item)))` types cleanly as `Owned<Disposable>[]` — non-disposable elements, no report — while `items.map(makeResource)` still types as `Disposable[]` and is flagged. Recommended companion declaration:
 
 ```ts

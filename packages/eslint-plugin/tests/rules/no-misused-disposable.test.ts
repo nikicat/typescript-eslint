@@ -336,12 +336,16 @@ declare const items: number[];
   handles;
 }
     `,
-    // Array of disposables that escapes via return — caller takes ownership.
+    // Array of disposables consumed via an `Iterable<Disposable>` parameter —
+    // the destination contract is element-wise consumption, so ownership is
+    // considered transferred (matches the user's `useAll(stack, items)` pattern).
     `
 declare function makeResource(): Disposable;
+declare function consumeAll<T extends Disposable>(items: Iterable<T>): void;
 declare const items: number[];
-function produceAll(): Disposable[] {
-  return items.map(item => makeResource());
+function f() {
+  const handles = items.map(() => makeResource());
+  consumeAll(handles);
 }
     `,
   ],
@@ -935,6 +939,65 @@ function f() {
       errors: [
         {
           data: { kind: 'const', memberName: 'pair' },
+          messageId: 'arrayDeclarationContainsDisposables',
+        },
+      ],
+    },
+    // Array passed to a `Disposable[]`-typed function parameter — opaque
+    // handoff, no per-element transfer guarantee. Still flagged.
+    {
+      code: `
+declare function makeResource(): Disposable;
+declare function takeArray(items: Disposable[]): void;
+declare const items: number[];
+function f() {
+  const handles = items.map(() => makeResource());
+  takeArray(handles);
+}
+      `,
+      errors: [
+        {
+          data: { kind: 'const', memberName: 'handles' },
+          messageId: 'arrayDeclarationContainsDisposables',
+        },
+      ],
+    },
+    // Array passed to a constructor parameter typed `Disposable[]` — same
+    // opaque handoff. Mirrors the `new RebalanceTracker(inventories)` shape
+    // observed in the perpbot-yellow smoke test.
+    {
+      code: `
+declare function makeResource(): Disposable;
+class Holder {
+  constructor(items: Disposable[]) {}
+}
+declare const items: number[];
+function f() {
+  const handles = items.map(() => makeResource());
+  return new Holder(handles);
+}
+      `,
+      errors: [
+        {
+          data: { kind: 'const', memberName: 'handles' },
+          messageId: 'arrayDeclarationContainsDisposables',
+        },
+      ],
+    },
+    // Function-return-shape: returning `Disposable[]` does NOT count as
+    // ownership transfer to caller — caller can't `using`-bind an array.
+    {
+      code: `
+declare function makeResource(): Disposable;
+declare const items: number[];
+function produce(): Disposable[] {
+  const handles = items.map(() => makeResource());
+  return handles;
+}
+      `,
+      errors: [
+        {
+          data: { kind: 'const', memberName: 'handles' },
           messageId: 'arrayDeclarationContainsDisposables',
         },
       ],

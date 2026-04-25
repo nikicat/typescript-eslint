@@ -429,7 +429,7 @@ export default createRule<Options, MessageId>({
                 ref =>
                   isExplicitDisposeCall(ref) ||
                   isIteratorReturnCall(ref) ||
-                  doesReferenceEscape(ref),
+                  doesReferenceEscape(ref, info.shape),
               ),
             )
           ) {
@@ -660,11 +660,12 @@ export default createRule<Options, MessageId>({
     // of the underlying field" check, used by Check 2 of class-member tracking.
     function isMemberExpressionHandled(
       member: TSESTree.MemberExpression,
+      shape: DisposableShape = 'value',
     ): boolean {
       return (
         isExplicitDisposeCallOnNode(member) ||
         isIteratorReturnCallOnNode(member) ||
-        walkEscape(member)
+        walkEscape(member, shape)
       );
     }
 
@@ -672,14 +673,70 @@ export default createRule<Options, MessageId>({
     // destination whose type still carries `Disposable`/`AsyncDisposable`.
     // Non-disposable destinations (e.g. `console.log(x: unknown)`) leave the
     // resource orphaned, so they are not treated as escape.
-    function doesReferenceEscape(ref: TSESLint.Scope.Reference): boolean {
-      return ref.isRead() && walkEscape(ref.identifier);
+    function doesReferenceEscape(
+      ref: TSESLint.Scope.Reference,
+      shape: DisposableShape = 'value',
+    ): boolean {
+      return ref.isRead() && walkEscape(ref.identifier, shape);
+    }
+
+    // Whether a destination type "preserves" the kind for the source shape.
+    // - Value source: destination must itself carry `Symbol.(async)Dispose`
+    //   (directly or via a `Disposable[]`-typed slot — both still indicate the
+    //   destination owns disposable resources).
+    // - Array source: destination must be a *consumer* (Iterable/AsyncIterable
+    //   of disposables) and *not* itself an array or tuple. Receiving a
+    //   `Disposable[]` into a same-shaped slot is opaque handoff — the receiver
+    //   may store and never dispose. Receiving via `Iterable<Disposable>` is a
+    //   contract for elementwise consumption (e.g. `useAll(stack, items)`).
+    function preservesDisposableKindForShape(
+      t: ts.Type | undefined,
+      shape: DisposableShape,
+    ): boolean {
+      if (t == null) {
+        return true;
+      }
+      if (shape === 'value') {
+        return getDisposableInfo(t, checker) != null;
+      }
+      return isIterableConsumerNotArray(t);
+    }
+
+    // True if the destination accepts an array of disposables as an
+    // element-wise *consumer* rather than opaque storage. Heuristic: the
+    // type carries `[Symbol.iterator]`/`[Symbol.asyncIterator]` (i.e.
+    // promises iteration) but is not itself an `Array`/`Tuple` slot
+    // (which would just hold a reference). Element-kind isn't checked —
+    // matches the trust level applied to single-`Disposable` parameters.
+    function isIterableConsumerNotArray(t: ts.Type): boolean {
+      for (const part of tsutils
+        .unionConstituents(t)
+        .map(p => checker.getApparentType(p))) {
+        if (checker.isArrayType(part) || checker.isTupleType(part)) {
+          continue;
+        }
+        if (
+          tsutils.getWellKnownSymbolPropertyOfType(part, 'iterator', checker) !=
+            null ||
+          tsutils.getWellKnownSymbolPropertyOfType(
+            part,
+            'asyncIterator',
+            checker,
+          ) != null
+        ) {
+          return true;
+        }
+      }
+      return false;
     }
 
     // Same parent-walk as `doesReferenceEscape`, but anchored on an arbitrary
     // node — used to ask "does this `this.foo` MemberExpression escape?"
     // when classifying class-member reads inside a dispose method.
-    function walkEscape(start: TSESTree.Node): boolean {
+    function walkEscape(
+      start: TSESTree.Node,
+      shape: DisposableShape = 'value',
+    ): boolean {
       let node: TSESTree.Node = start;
       let parent = node.parent as TSESTree.Node | undefined;
       while (parent) {
@@ -702,7 +759,7 @@ export default createRule<Options, MessageId>({
             if (fn == null) {
               return false;
             }
-            return preservesDisposableKind(getReturnType(fn));
+            return preservesDisposableKindForShape(getReturnType(fn), shape);
           }
 
           case AST_NODE_TYPES.ArrowFunctionExpression: {
@@ -710,7 +767,10 @@ export default createRule<Options, MessageId>({
             if (parent.body !== node) {
               return false;
             }
-            return preservesDisposableKind(getReturnType(parent));
+            return preservesDisposableKindForShape(
+              getReturnType(parent),
+              shape,
+            );
           }
 
           case AST_NODE_TYPES.CallExpression:
@@ -725,8 +785,9 @@ export default createRule<Options, MessageId>({
               return false;
             }
             const tsCall = services.esTreeNodeToTSNodeMap.get(parent);
-            return preservesDisposableKind(
+            return preservesDisposableKindForShape(
               checker.getContextualTypeForArgumentAtIndex(tsCall, argIndex),
+              shape,
             );
           }
 
@@ -734,8 +795,9 @@ export default createRule<Options, MessageId>({
             if (parent.right !== node) {
               return false;
             }
-            return preservesDisposableKind(
+            return preservesDisposableKindForShape(
               services.getTypeAtLocation(parent.left),
+              shape,
             );
           }
 
@@ -746,22 +808,29 @@ export default createRule<Options, MessageId>({
             const tsNode = services.esTreeNodeToTSNodeMap.get(
               node,
             ) as ts.Expression;
-            return preservesDisposableKind(checker.getContextualType(tsNode));
+            return preservesDisposableKindForShape(
+              checker.getContextualType(tsNode),
+              shape,
+            );
           }
 
           case AST_NODE_TYPES.ArrayExpression: {
             const tsNode = services.esTreeNodeToTSNodeMap.get(
               node,
             ) as ts.Expression;
-            return preservesDisposableKind(checker.getContextualType(tsNode));
+            return preservesDisposableKindForShape(
+              checker.getContextualType(tsNode),
+              shape,
+            );
           }
 
           case AST_NODE_TYPES.VariableDeclarator: {
             if (parent.init !== node) {
               return false;
             }
-            return preservesDisposableKind(
+            return preservesDisposableKindForShape(
               services.getTypeAtLocation(parent.id),
+              shape,
             );
           }
 
